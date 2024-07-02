@@ -56,14 +56,13 @@ use core::str;
 
 use crate::collections::queue::Queue;
 use crate::collections::ring_buffer::RingBuffer;
-use crate::hil;
 use crate::platform::chip::Chip;
-use crate::process::Process;
 use crate::process::ProcessPrinter;
 use crate::utilities::binary_write::BinaryToWriteWrapper;
 use crate::utilities::cells::NumericCellExt;
 use crate::utilities::cells::{MapCell, TakeCell};
 use crate::ErrorCode;
+use crate::{hil, ProcEntry};
 
 /// This trait is similar to std::io::Write in that it takes bytes instead of a string (contrary to
 /// core::fmt::Write), but io::Write isn't available in no_std (due to std::io::Error not being
@@ -105,16 +104,34 @@ pub unsafe fn panic_print<W: Write + IoWrite, C: Chip, PP: ProcessPrinter>(
     writer: &mut W,
     panic_info: &PanicInfo,
     nop: &dyn Fn(),
-    processes: &'static [Option<&'static dyn Process>],
+    processes: &'static [ProcEntry],
     chip: &'static Option<&'static C>,
     process_printer: &'static Option<&'static PP>,
+) {
+    panic_print_2(
+        writer,
+        panic_info,
+        nop,
+        processes,
+        chip.map(|c| c),
+        process_printer.map(|pp| pp),
+    );
+}
+
+pub unsafe fn panic_print_2<W: Write + IoWrite, C: Chip, PP: ProcessPrinter>(
+    writer: &mut W,
+    panic_info: &PanicInfo,
+    nop: &dyn Fn(),
+    processes: &'static [ProcEntry],
+    chip: Option<&'static C>,
+    process_printer: Option<&'static PP>,
 ) {
     panic_begin(nop);
     panic_banner(writer, panic_info);
     // Flush debug buffer if needed
     flush(writer);
-    panic_cpu_state(chip, writer);
-    panic_process_info(processes, process_printer, writer);
+    panic_cpu_state_2(chip, writer);
+    panic_process_info_2(processes, process_printer, writer);
 }
 
 /// Tock default panic routine.
@@ -125,7 +142,7 @@ pub unsafe fn panic<L: hil::led::Led, W: Write + IoWrite, C: Chip, PP: ProcessPr
     writer: &mut W,
     panic_info: &PanicInfo,
     nop: &dyn Fn(),
-    processes: &'static [Option<&'static dyn Process>],
+    processes: &'static [ProcEntry],
     chip: &'static Option<&'static C>,
     process_printer: &'static Option<&'static PP>,
 ) -> ! {
@@ -172,6 +189,10 @@ pub unsafe fn panic_cpu_state<W: Write, C: Chip>(
     chip: &'static Option<&'static C>,
     writer: &mut W,
 ) {
+    panic_cpu_state_2(chip.map(|c| c), writer);
+}
+
+pub unsafe fn panic_cpu_state_2<W: Write, C: Chip>(chip: Option<&'static C>, writer: &mut W) {
     chip.map(|c| {
         c.print_state(writer);
     });
@@ -181,15 +202,23 @@ pub unsafe fn panic_cpu_state<W: Write, C: Chip>(
 ///
 /// **NOTE:** The supplied `writer` must be synchronous.
 pub unsafe fn panic_process_info<PP: ProcessPrinter, W: Write>(
-    procs: &'static [Option<&'static dyn Process>],
+    procs: &'static [ProcEntry],
     process_printer: &'static Option<&'static PP>,
+    writer: &mut W,
+) {
+    panic_process_info_2(procs, process_printer.map(|pp| pp), writer)
+}
+
+pub unsafe fn panic_process_info_2<PP: ProcessPrinter, W: Write>(
+    procs: &'static [ProcEntry],
+    process_printer: Option<&'static PP>,
     writer: &mut W,
 ) {
     process_printer.map(|printer| {
         // print data about each process
         let _ = writer.write_fmt(format_args!("\r\n---| App Status |---\r\n"));
         for idx in 0..procs.len() {
-            procs[idx].map(|process| {
+            procs[idx].proc_ref.get().map(|process| {
                 // Print the memory map and basic process info.
                 //
                 // Because we are using a synchronous printer we do not need to
@@ -322,7 +351,7 @@ pub fn debug_enqueue_fmt(args: Arguments) {
 }
 
 pub fn debug_flush_queue_() {
-    let writer = unsafe { get_debug_writer() };
+    let mut writer = get_debug_writer();
 
     unsafe { DEBUG_QUEUE.as_deref_mut() }.map(|buffer| {
         buffer.dw.map(|dw| {
@@ -363,8 +392,9 @@ macro_rules! debug_flush_queue {
 
 /// Wrapper type that we need a mutable reference to for the core::fmt::Write
 /// interface.
+#[derive(Copy, Clone)]
 pub struct DebugWriterWrapper {
-    dw: MapCell<&'static DebugWriter>,
+    dw: &'static DebugWriter,
 }
 
 /// Main type that we need an immutable reference to so we can share it with
@@ -382,31 +412,30 @@ pub struct DebugWriter {
 
 /// Static variable that holds the kernel's reference to the debug tool. This is
 /// needed so the debug!() macros have a reference to the object to use.
-static mut DEBUG_WRITER: Option<&'static mut DebugWriterWrapper> = None;
+static mut DEBUG_WRITER: Option<DebugWriterWrapper> = None;
 
-unsafe fn try_get_debug_writer() -> Option<&'static mut DebugWriterWrapper> {
-    DEBUG_WRITER.as_deref_mut()
+fn try_get_debug_writer() -> Option<DebugWriterWrapper> {
+    unsafe { DEBUG_WRITER }
 }
 
-unsafe fn get_debug_writer() -> &'static mut DebugWriterWrapper {
+fn get_debug_writer() -> DebugWriterWrapper {
     try_get_debug_writer().unwrap() // Unwrap fail = Must call `set_debug_writer_wrapper` in board initialization.
 }
 
 /// Function used by board main.rs to set a reference to the writer.
-pub unsafe fn set_debug_writer_wrapper(debug_writer: &'static mut DebugWriterWrapper) {
-    DEBUG_WRITER = Some(debug_writer);
+/// TODO: This should really pass DebugWriterWrapper by value as it already hides a reference.
+pub unsafe fn set_debug_writer_wrapper(debug_writer: &'static DebugWriterWrapper) {
+    DEBUG_WRITER = Some(*debug_writer);
 }
 
 impl DebugWriterWrapper {
-    pub fn new(dw: &'static DebugWriter) -> DebugWriterWrapper {
-        DebugWriterWrapper {
-            dw: MapCell::new(dw),
-        }
+    pub const fn new(dw: &'static DebugWriter) -> DebugWriterWrapper {
+        DebugWriterWrapper { dw }
     }
 }
 
 impl DebugWriter {
-    pub fn new(
+    pub const fn new(
         uart: &'static dyn hil::uart::Transmit,
         out_buffer: &'static mut [u8],
         internal_buffer: &'static mut RingBuffer<'static, u8>,
@@ -433,7 +462,7 @@ impl DebugWriter {
         // Can only publish if we have the output_buffer. If we don't that is
         // fine, we will do it when the transmit done callback happens.
         self.internal_buffer.map(|ring_buffer| {
-            if let Some(out_buffer) = self.output_buffer.take() {
+            while let Some(out_buffer) = self.output_buffer.take() {
                 let mut count = 0;
 
                 for dst in out_buffer.iter_mut() {
@@ -455,6 +484,9 @@ impl DebugWriter {
                     } else {
                         self.output_buffer.put(None);
                     }
+                } else {
+                    self.output_buffer.put(Some(out_buffer));
+                    break;
                 }
             }
         });
@@ -486,49 +518,42 @@ impl hil::uart::TransmitClient for DebugWriter {
 /// Pass through functions.
 impl DebugWriterWrapper {
     fn increment_count(&self) {
-        self.dw.map(|dw| {
-            dw.increment_count();
-        });
+        self.dw.increment_count()
     }
 
     fn get_count(&self) -> usize {
-        self.dw.map_or(0, |dw| dw.get_count())
+        self.dw.get_count()
     }
 
     fn publish_bytes(&self) {
-        self.dw.map(|dw| {
-            dw.publish_bytes();
-        });
+        self.dw.publish_bytes()
     }
 
     fn extract(&self) -> Option<&mut RingBuffer<'static, u8>> {
-        self.dw.map_or(None, |dw| dw.extract())
+        self.dw.extract()
     }
 }
 
 impl IoWrite for DebugWriterWrapper {
     fn write(&mut self, bytes: &[u8]) {
         const FULL_MSG: &[u8] = b"\n*** DEBUG BUFFER FULL ***\n";
-        self.dw.map(|dw| {
-            dw.internal_buffer.map(|ring_buffer| {
-                let available_len_for_msg =
-                    ring_buffer.available_len().saturating_sub(FULL_MSG.len());
+        self.dw.internal_buffer.map(|ring_buffer| {
+            let available_len_for_msg = ring_buffer.available_len().saturating_sub(FULL_MSG.len());
 
-                if available_len_for_msg >= bytes.len() {
-                    for &b in bytes {
-                        ring_buffer.enqueue(b);
-                    }
-                } else {
-                    for &b in &bytes[..available_len_for_msg] {
-                        ring_buffer.enqueue(b);
-                    }
-                    // When the buffer is close to full, print a warning and drop the current
-                    // string.
-                    for &b in FULL_MSG {
-                        ring_buffer.enqueue(b);
-                    }
+            if available_len_for_msg >= bytes.len() {
+                for &b in bytes {
+                    ring_buffer.enqueue(b);
                 }
-            });
+            } else {
+                for &b in &bytes[..available_len_for_msg] {
+                    ring_buffer.enqueue(b);
+                }
+                // When the buffer is close to full, print a warning and drop the current
+                // string.
+                for &b in FULL_MSG {
+                    ring_buffer.enqueue(b);
+                }
+            }
         });
     }
 }
@@ -541,39 +566,39 @@ impl Write for DebugWriterWrapper {
 }
 
 pub fn debug_print(args: Arguments) {
-    let writer = unsafe { get_debug_writer() };
+    let mut writer = get_debug_writer();
 
-    let _ = write(writer, args);
+    let _ = write(&mut writer, args);
     writer.publish_bytes();
 }
 
 pub fn debug_println(args: Arguments) {
-    let writer = unsafe { get_debug_writer() };
+    let mut writer = get_debug_writer();
 
-    let _ = write(writer, args);
+    let _ = write(&mut writer, args);
     let _ = writer.write_str("\r\n");
     writer.publish_bytes();
 }
 
-fn write_header(writer: &mut DebugWriterWrapper, (file, line): &(&'static str, u32)) -> Result {
+fn write_header(mut writer: DebugWriterWrapper, (file, line): &(&'static str, u32)) -> Result {
     writer.increment_count();
     let count = writer.get_count();
     writer.write_fmt(format_args!("TOCK_DEBUG({}): {}:{}: ", count, file, line))
 }
 
 pub fn debug_verbose_print(args: Arguments, file_line: &(&'static str, u32)) {
-    let writer = unsafe { get_debug_writer() };
+    let mut writer = get_debug_writer();
 
     let _ = write_header(writer, file_line);
-    let _ = write(writer, args);
+    let _ = write(&mut writer, args);
     writer.publish_bytes();
 }
 
 pub fn debug_verbose_println(args: Arguments, file_line: &(&'static str, u32)) {
-    let writer = unsafe { get_debug_writer() };
+    let mut writer = get_debug_writer();
 
     let _ = write_header(writer, file_line);
-    let _ = write(writer, args);
+    let _ = write(&mut writer, args);
     let _ = writer.write_str("\r\n");
     writer.publish_bytes();
 }
@@ -586,10 +611,10 @@ macro_rules! debug {
         debug!("")
     });
     ($msg:expr $(,)?) => ({
-        $crate::debug::debug_println(format_args!($msg))
+            $crate::debug::debug_println(format_args!($msg))
     });
     ($fmt:expr, $($arg:tt)+) => ({
-        $crate::debug::debug_println(format_args!($fmt, $($arg)+))
+            $crate::debug::debug_println(format_args!($fmt, $($arg)+))
     });
 }
 
@@ -601,18 +626,18 @@ macro_rules! debug_verbose {
         debug_verbose!("")
     });
     ($msg:expr $(,)?) => ({
-        $crate::debug::debug_verbose_println(format_args!($msg), {
-            // TODO: Maybe make opposite choice of panic!, no `static`, more
-            // runtime code for less static data
-            static _FILE_LINE: (&'static str, u32) = (file!(), line!());
-            &_FILE_LINE
-        })
+            $crate::debug::debug_verbose_println(format_args!($msg), {
+                // TODO: Maybe make opposite choice of panic!, no `static`, more
+                // runtime code for less static data
+                static _FILE_LINE: (&'static str, u32) = (file!(), line!());
+                &_FILE_LINE
+            })
     });
     ($fmt:expr, $($arg:tt)+) => ({
-        $crate::debug::debug_verbose_println(format_args!($fmt, $($arg)+), {
-            static _FILE_LINE: (&'static str, u32) = (file!(), line!());
-            &_FILE_LINE
-        })
+            $crate::debug::debug_verbose_println(format_args!($fmt, $($arg)+), {
+                static _FILE_LINE: (&'static str, u32) = (file!(), line!());
+                &_FILE_LINE
+            })
     });
 }
 

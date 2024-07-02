@@ -3,6 +3,7 @@
 use crate::platform::mpu;
 use crate::syscall;
 use core::fmt::Write;
+use core::ptr::NonNull;
 
 /// Interface for individual MCUs.
 ///
@@ -64,6 +65,11 @@ pub trait Chip {
     /// the Display trait.
     /// Used by panic.
     unsafe fn print_state(&self, writer: &mut dyn Write);
+
+    /// Should be called whenever executable memory is written,
+    /// before any new execution.
+    /// This can be used, for example, to sync ICache and DCache.
+    fn on_executable_memory_changed(_range: NonNull<[u8]>) {}
 }
 
 /// Interface for handling interrupts and deferred calls on a hardware chip.

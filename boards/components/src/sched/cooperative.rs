@@ -13,9 +13,8 @@
 
 use core::mem::MaybeUninit;
 use kernel::component::Component;
-use kernel::process::Process;
 use kernel::scheduler::cooperative::{CoopProcessNode, CooperativeSched};
-use kernel::{static_init, static_init_half};
+use kernel::{static_init, static_init_half, ProcEntry};
 
 #[macro_export]
 macro_rules! coop_component_helper {
@@ -30,11 +29,11 @@ macro_rules! coop_component_helper {
 }
 
 pub struct CooperativeComponent {
-    processes: &'static [Option<&'static dyn Process>],
+    processes: &'static [ProcEntry],
 }
 
 impl CooperativeComponent {
-    pub fn new(processes: &'static [Option<&'static dyn Process>]) -> CooperativeComponent {
+    pub fn new(processes: &'static [ProcEntry]) -> CooperativeComponent {
         CooperativeComponent { processes }
     }
 }
@@ -50,7 +49,7 @@ impl Component for CooperativeComponent {
             let init_node = static_init_half!(
                 node,
                 CoopProcessNode<'static>,
-                CoopProcessNode::new(&self.processes[i])
+                CoopProcessNode::new(&self.processes[i].proc_ref)
             );
             scheduler.processes.push_head(init_node);
         }

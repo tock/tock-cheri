@@ -25,21 +25,29 @@ use crate::scheduler::{Scheduler, SchedulingDecision};
 /// A node in the linked list the scheduler uses to track processes
 /// Each node holds a pointer to a slot in the processes array
 pub struct RoundRobinProcessNode<'a> {
-    proc: &'static Option<&'static dyn Process>,
+    proc: &'static Cell<Option<&'static dyn Process>>,
     next: ListLink<'a, RoundRobinProcessNode<'a>>,
 }
 
 impl<'a> RoundRobinProcessNode<'a> {
-    pub fn new(proc: &'static Option<&'static dyn Process>) -> RoundRobinProcessNode<'a> {
+    pub const fn new(
+        proc: &'static Cell<Option<&'static dyn Process>>,
+    ) -> RoundRobinProcessNode<'a> {
         RoundRobinProcessNode {
             proc,
             next: ListLink::empty(),
         }
     }
+    pub const fn new_with_next(
+        proc: &'static Cell<Option<&'static dyn Process>>,
+        next: ListLink<'a, RoundRobinProcessNode<'a>>,
+    ) -> RoundRobinProcessNode<'a> {
+        RoundRobinProcessNode { proc, next }
+    }
 }
 
 impl<'a> ListNode<'a, RoundRobinProcessNode<'a>> for RoundRobinProcessNode<'a> {
-    fn next(&'a self) -> &'a ListLink<'a, RoundRobinProcessNode> {
+    fn next(&self) -> &ListLink<'a, RoundRobinProcessNode<'a>> {
         &self.next
     }
 }
@@ -54,12 +62,17 @@ pub struct RoundRobinSched<'a> {
 impl<'a> RoundRobinSched<'a> {
     /// How long a process can run before being pre-empted
     const DEFAULT_TIMESLICE_US: u32 = 10000;
-    pub const fn new() -> RoundRobinSched<'a> {
+    pub const fn new_with_head(
+        head: ListLink<'a, RoundRobinProcessNode<'a>>,
+    ) -> RoundRobinSched<'a> {
         RoundRobinSched {
             time_remaining: Cell::new(Self::DEFAULT_TIMESLICE_US),
-            processes: List::new(),
+            processes: List::new_with_head(head),
             last_rescheduled: Cell::new(false),
         }
+    }
+    pub const fn new() -> RoundRobinSched<'a> {
+        Self::new_with_head(ListLink::empty())
     }
 }
 
@@ -75,7 +88,7 @@ impl<'a, C: Chip> Scheduler<C> for RoundRobinSched<'a> {
             // Find next ready process. Place any *empty* process slots, or not-ready
             // processes, at the back of the queue.
             for node in self.processes.iter() {
-                match node.proc {
+                match node.proc.get() {
                     Some(proc) => {
                         if proc.ready() {
                             next = Some(proc.processid());

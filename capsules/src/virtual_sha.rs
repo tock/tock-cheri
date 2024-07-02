@@ -29,7 +29,7 @@ pub struct VirtualMuxSha<'a, A: digest::Digest<'a, L>, const L: usize> {
 impl<'a, A: digest::Digest<'a, L>, const L: usize> ListNode<'a, VirtualMuxSha<'a, A, L>>
     for VirtualMuxSha<'a, A, L>
 {
-    fn next(&self) -> &'a ListLink<VirtualMuxSha<'a, A, L>> {
+    fn next(&self) -> &ListLink<'a, VirtualMuxSha<'a, A, L>> {
         &self.next
     }
 }

@@ -5,12 +5,13 @@ register_bitfields![usize,
         is_interrupt OFFSET(crate::XLEN - 1) NUMBITS(1) [],
         reason OFFSET(0) NUMBITS(crate::XLEN - 1) []
     ],
-    // Per the spec, implementations are allowed to use the higher bits of the
-    // interrupt/exception reason for their own purposes.  For regular parsing,
-    // we only concern ourselves with the "standard" values.
+    // Although the base spec only defines the first 4 bits, some patterns in the first 6 bits
+    // are designated for custom use so we should include them here.
+    // I don't like the truncation here and as nothing is actually checking that reserved is 0
+    // and this can lead to weird errors.
     reason [
-        reserved OFFSET(4) NUMBITS(crate::XLEN - 5) [],
-        std OFFSET(0) NUMBITS(4) []
+        reserved OFFSET(6) NUMBITS(crate::XLEN - 7) [],
+        std OFFSET(0) NUMBITS(6) []
     ]
 ];
 
@@ -53,7 +54,7 @@ pub enum Interrupt {
 }
 
 /// Exception
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Exception {
     InstructionMisaligned,
     InstructionFault,
@@ -69,6 +70,10 @@ pub enum Exception {
     InstructionPageFault,
     LoadPageFault,
     StorePageFault,
+    #[cfg(target_feature = "xcheri")]
+    CHERIPageException,
+    #[cfg(target_feature = "xcheri")]
+    CHERIException,
     Unknown,
 }
 
@@ -108,6 +113,10 @@ impl Exception {
             12 => Exception::InstructionPageFault,
             13 => Exception::LoadPageFault,
             15 => Exception::StorePageFault,
+            #[cfg(target_feature = "xcheri")]
+            0x1b => Exception::CHERIPageException,
+            #[cfg(target_feature = "xcheri")]
+            0x1c => Exception::CHERIException,
             _ => Exception::Unknown,
         }
     }

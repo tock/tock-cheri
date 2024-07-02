@@ -16,14 +16,14 @@ pub struct TakeCell<'a, T: 'a + ?Sized> {
 }
 
 impl<'a, T: ?Sized> TakeCell<'a, T> {
-    pub fn empty() -> TakeCell<'a, T> {
+    pub const fn empty() -> TakeCell<'a, T> {
         TakeCell {
             val: Cell::new(None),
         }
     }
 
     /// Creates a new `TakeCell` containing `value`
-    pub fn new(value: &'a mut T) -> TakeCell<'a, T> {
+    pub const fn new(value: &'a mut T) -> TakeCell<'a, T> {
         TakeCell {
             val: Cell::new(Some(value)),
         }

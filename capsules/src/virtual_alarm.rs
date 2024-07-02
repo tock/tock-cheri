@@ -45,15 +45,15 @@ pub struct VirtualMuxAlarm<'a, A: Alarm<'a>> {
 }
 
 impl<'a, A: Alarm<'a>> ListNode<'a, VirtualMuxAlarm<'a, A>> for VirtualMuxAlarm<'a, A> {
-    fn next(&self) -> &'a ListLink<VirtualMuxAlarm<'a, A>> {
+    fn next(&self) -> &ListLink<'a, VirtualMuxAlarm<'a, A>> {
         &self.next
     }
 }
 
 impl<'a, A: Alarm<'a>> VirtualMuxAlarm<'a, A> {
     /// After calling new, always call setup()
-    pub fn new(mux_alarm: &'a MuxAlarm<'a, A>) -> VirtualMuxAlarm<'a, A> {
-        let zero = A::Ticks::from(0);
+    pub const fn new(mux_alarm: &'a MuxAlarm<'a, A>) -> VirtualMuxAlarm<'a, A> {
+        let zero = A::Ticks::ZERO;
         VirtualMuxAlarm {
             mux: mux_alarm,
             dt_reference: Cell::new(TickDtReference {

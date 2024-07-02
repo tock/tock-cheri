@@ -7,6 +7,7 @@ use core::ptr::NonNull;
 use core::str;
 
 use crate::capabilities;
+use crate::cheri::cptr;
 use crate::errorcode::ErrorCode;
 use crate::ipc;
 use crate::kernel::Kernel;
@@ -24,7 +25,9 @@ pub use crate::process_policies::{
 };
 pub use crate::process_printer::{ProcessPrinter, ProcessPrinterContext, ProcessPrinterText};
 pub use crate::process_standard::ProcessStandard;
-pub use crate::process_utilities::{load_processes, load_processes_advanced, ProcessLoadError};
+pub use crate::process_utilities::{
+    get_mems, load_processes, load_processes_advanced, try_load_process_pub, ProcessLoadError,
+};
 
 /// Userspace process identifier.
 ///
@@ -197,6 +200,10 @@ pub trait Process {
     /// kernel-internal errors.
     fn enqueue_task(&self, task: Task) -> Result<(), ErrorCode>;
 
+    /// Performs the checks for enqueue_task and returns errors in the same cases,
+    /// or otherwise does nothing and returns unit.
+    fn could_enqueue_task(&self) -> Result<(), ErrorCode>;
+
     /// Returns whether this process is ready to execute.
     fn ready(&self) -> bool;
 
@@ -249,7 +256,7 @@ pub trait Process {
     fn get_restart_count(&self) -> usize;
 
     /// Get the name of the process. Used for IPC.
-    fn get_process_name(&self) -> &'static str;
+    fn get_process_name(&self) -> &str;
 
     /// Get the completion code if the process has previously terminated.
     ///
@@ -262,6 +269,13 @@ pub trait Process {
     /// the last time the process terminated it did provide a completion code,
     /// this will return `Some(Some(completion_code))`.
     fn get_completion_code(&self) -> Option<Option<u32>>;
+
+    /// Try and reclaim all grant memory.
+    /// This can fail because there still exist grant references within the kernel.
+    /// The eventual plan is to try restart after some interval (to allow hardware to finish
+    /// with references naturally).
+    /// For now, panic is fine if this fails.
+    fn try_release_grants(&self) -> Result<(), ()>;
 
     /// Stop and clear a process's state, putting it into the `Terminated`
     /// state.
@@ -317,7 +331,7 @@ pub trait Process {
     /// This will fail with an error if the process is no longer active. An
     /// inactive process will not run again without being reset, and changing
     /// the memory pointers is not valid at this point.
-    fn brk(&self, new_break: *const u8) -> Result<*const u8, Error>;
+    fn brk(&self, new_break: *const u8) -> Result<cptr, Error>;
 
     /// Change the location of the program break, reallocate the MPU region
     /// covering program memory, and return the previous break address.
@@ -325,7 +339,7 @@ pub trait Process {
     /// This will fail with an error if the process is no longer active. An
     /// inactive process will not run again without being reset, and changing
     /// the memory pointers is not valid at this point.
-    fn sbrk(&self, increment: isize) -> Result<*const u8, Error>;
+    fn sbrk(&self, increment: isize) -> Result<cptr, Error>;
 
     /// How many writeable flash regions defined in the TBF header for this
     /// process.
@@ -333,7 +347,7 @@ pub trait Process {
 
     /// Get the offset from the beginning of flash and the size of the defined
     /// writeable flash region.
-    fn get_writeable_flash_region(&self, region_index: usize) -> (u32, u32);
+    fn get_writeable_flash_region(&self, region_index: usize) -> (usize, usize);
 
     /// Debug function to update the kernel on where the stack starts for this
     /// process. Processes are not required to call this through the memop
@@ -422,6 +436,9 @@ pub trait Process {
     /// the process will not run again).
     fn setup_mpu(&self);
 
+    /// Disable MMU configuration specific to this process.
+    fn disable_mmu(&self);
+
     /// Allocate a new MPU region for the process that is at least
     /// `min_region_size` bytes and lies within the specified stretch of
     /// unallocated memory.
@@ -435,12 +452,24 @@ pub trait Process {
         min_region_size: usize,
     ) -> Option<mpu::Region>;
 
+    /// Align a region so that the MPU could enforce it
+    /// FIXME: I hate that this is in process, but ProcessStandard seems to be the only thing
+    /// that knows about the type of the MPU. Really, Kernel should be parameterised in the
+    /// Chip, rather than its individual methods, so the type does not get lost.
+    /// b/280426926
+    fn align_mpu_region(&self, base: usize, length: usize) -> (usize, usize);
+
     /// Removes an MPU region from the process that has been previouly added with
     /// `add_mpu_region`.
     ///
     /// It is not valid to call this function when the process is inactive (i.e.
     /// the process will not run again).
-    fn remove_mpu_region(&self, region: mpu::Region) -> Result<(), ErrorCode>;
+    fn remove_mpu_region(&self, region: mpu::Region) -> Result<mpu::RemoveRegionResult, ErrorCode>;
+
+    /// Actually revoke regions previously requested with remove_memory_region
+    /// Safety: no LiveARef or LivePRef may exist to any memory that might be revoked,
+    /// Nor may any grants be entered via the legacy mechanism if allowed memory might be revoked.
+    unsafe fn revoke_regions(&self) -> Result<(), ErrorCode>;
 
     // grants
 
@@ -453,7 +482,7 @@ pub trait Process {
     /// actual app_brk, as MPU alignment and size constraints may result in the
     /// MPU enforced region differing from the app_brk.
     ///
-    /// This will return `false` and fail if:
+    /// This will return `None` and fail if:
     /// - The process is inactive, or
     /// - There is not enough available memory to do the allocation, or
     /// - The grant_num is invalid, or
@@ -464,13 +493,7 @@ pub trait Process {
         driver_num: usize,
         size: usize,
         align: usize,
-    ) -> bool;
-
-    /// Check if a given grant for this process has been allocated.
-    ///
-    /// Returns `None` if the process is not active. Otherwise, returns `true`
-    /// if the grant has been allocated, `false` otherwise.
-    fn grant_is_allocated(&self, grant_num: usize) -> Option<bool>;
+    ) -> Option<NonNull<u8>>;
 
     /// Allocate memory from the grant region that is `size` bytes long and
     /// aligned to `align` bytes. This is used for creating custom grants which
@@ -484,18 +507,16 @@ pub trait Process {
         &self,
         size: usize,
         align: usize,
-    ) -> Option<(ProcessCustomGrantIdentifer, NonNull<u8>)>;
+    ) -> Option<(ProcessCustomGrantIdentifier, NonNull<u8>)>;
 
-    /// Enter the grant based on `grant_num` for this process.
-    ///
-    /// Entering a grant means getting access to the actual memory for the
-    /// object stored as the grant.
+    /// Get the grant based on `grant_num` for this process, getting access
+    /// to the actual memory for the object stored as the grant.
     ///
     /// This will return an `Err` if the process is inactive of the `grant_num`
-    /// is invalid, if the grant has not been allocated, or if the grant is
-    /// already entered. If this returns `Ok()` then the pointer points to the
-    /// previously allocated memory for this grant.
-    fn enter_grant(&self, grant_num: usize) -> Result<NonNull<u8>, Error>;
+    /// is invalid, if the grant has not been allocated.
+    /// If this returns `Ok()` then the pointer points to the
+    /// previously allocated memory for this grant, or NULL.
+    fn get_grant_mem(&self, grant_num: usize) -> Result<Option<NonNull<u8>>, Error>;
 
     /// Enter a custom grant based on the `identifier`.
     ///
@@ -504,25 +525,10 @@ pub trait Process {
     ///
     /// This returns an error if the custom grant is no longer accessible, or
     /// if the process is inactive.
-    fn enter_custom_grant(&self, identifier: ProcessCustomGrantIdentifer)
-        -> Result<*mut u8, Error>;
-
-    /// Opposite of `enter_grant()`. Used to signal that the grant is no longer
-    /// entered.
-    ///
-    /// If `grant_num` is valid, this function cannot fail. If `grant_num` is
-    /// invalid, this function will do nothing. If the process is inactive then
-    /// grants are invalid and are not entered or not entered, and this function
-    /// will do nothing.
-    ///
-    /// ### Safety
-    ///
-    /// The caller must ensure that no references to the memory inside the grant
-    /// exist after calling `leave_grant()`. Otherwise, it would be possible to
-    /// effectively enter the grant twice (once using the existing reference,
-    /// once with a new call to `enter_grant()`) which breaks the memory safety
-    /// requirements of grants.
-    unsafe fn leave_grant(&self, grant_num: usize);
+    fn enter_custom_grant(
+        &self,
+        identifier: ProcessCustomGrantIdentifier,
+    ) -> Result<*mut u8, Error>;
 
     /// Return the count of the number of allocated grant pointers if the
     /// process is active. This does not count custom grants. This is used
@@ -543,9 +549,13 @@ pub trait Process {
     ///
     /// Returns `true` if the upcall function pointer is valid for this process,
     /// and `false` otherwise.
-    fn is_valid_upcall_function_pointer(&self, upcall_fn: NonNull<()>) -> bool;
+    fn is_valid_upcall_function_pointer(&self, upcall_fn: *const u8) -> bool;
 
     // functions for processes that are architecture specific
+
+    /// Get extra arguments for commands. The value returned is indeterminate if
+    /// this is not called in the context of a driver handling a command.
+    fn get_extra_syscall_arg(&self, ndx: usize) -> Option<usize>;
 
     /// Set the return value the process should see when it begins executing
     /// again after the syscall.
@@ -634,7 +644,7 @@ pub trait Process {
 /// The fields of this struct are private so only Process can create this
 /// identifier.
 #[derive(Copy, Clone)]
-pub struct ProcessCustomGrantIdentifer {
+pub struct ProcessCustomGrantIdentifier {
     pub(crate) offset: usize,
 }
 
@@ -824,8 +834,8 @@ pub struct FunctionCall {
     pub argument0: usize,
     pub argument1: usize,
     pub argument2: usize,
-    pub argument3: usize,
-    pub pc: usize,
+    pub argument3: cptr,
+    pub pc: cptr,
 }
 
 /// Collection of process state information related to the memory addresses

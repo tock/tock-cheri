@@ -1,0 +1,16 @@
+[package]
+name = "qemu_cheri_virt"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+components = { path = "../components" }
+capsules = { path = "../../capsules" }
+kernel = { path = "../../kernel" }
+misc = { path = "../../libraries/misc" }
+uarts = { path = "../../chips/uarts", features = ["ns16550_u8"]}
+riscv = { path = "../../arch/riscv"}
+cheri = { path = "../../arch/cheri" }
+sifive = { path = "../../chips/sifive" }

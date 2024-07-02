@@ -127,7 +127,7 @@ impl<'a, P: hil::pwm::Pwm> PwmPinUser<'a, P> {
 }
 
 impl<'a, P: hil::pwm::Pwm> ListNode<'a, PwmPinUser<'a, P>> for PwmPinUser<'a, P> {
-    fn next(&'a self) -> &'a ListLink<'a, PwmPinUser<'a, P>> {
+    fn next(&self) -> &ListLink<'a, PwmPinUser<'a, P>> {
         &self.next
     }
 }

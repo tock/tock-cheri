@@ -1,4 +1,11 @@
+#![feature(const_mut_refs)]
+#![feature(type_alias_impl_trait)]
+#![feature(array_methods)]
+#![feature(macro_metavar_expr)]
+#![feature(const_trait_impl)]
+#![feature(const_precise_live_drops)]
 #![forbid(unsafe_code)]
+#![feature(const_convert)]
 #![no_std]
 
 pub mod test;
@@ -23,11 +30,13 @@ pub mod button;
 pub mod buzzer_driver;
 pub mod ccs811;
 pub mod console;
+pub mod console_zero;
 pub mod crc;
 pub mod ctap;
 pub mod dac;
 pub mod debug_process_restart;
 pub mod driver;
+pub mod dyn_proc_loader;
 pub mod fm25cl;
 pub mod ft6x06;
 pub mod fxos8700cq;
@@ -107,3 +116,4 @@ pub mod virtual_sha;
 pub mod virtual_spi;
 pub mod virtual_timer;
 pub mod virtual_uart;
+pub mod virtual_uart_zero;

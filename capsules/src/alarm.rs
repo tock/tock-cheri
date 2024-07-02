@@ -34,18 +34,17 @@ impl Default for AlarmData {
     }
 }
 
+pub type AlarmGrant = Grant<AlarmData, UpcallCount<NUM_UPCALLS>, AllowRoCount<0>, AllowRwCount<0>>;
+
 pub struct AlarmDriver<'a, A: Alarm<'a>> {
     alarm: &'a A,
     num_armed: Cell<usize>,
-    app_alarms: Grant<AlarmData, UpcallCount<NUM_UPCALLS>, AllowRoCount<0>, AllowRwCount<0>>,
+    app_alarms: AlarmGrant,
     next_alarm: Cell<Expiration>,
 }
 
 impl<'a, A: Alarm<'a>> AlarmDriver<'a, A> {
-    pub const fn new(
-        alarm: &'a A,
-        grant: Grant<AlarmData, UpcallCount<NUM_UPCALLS>, AllowRoCount<0>, AllowRwCount<0>>,
-    ) -> AlarmDriver<'a, A> {
+    pub const fn new(alarm: &'a A, grant: AlarmGrant) -> AlarmDriver<'a, A> {
         AlarmDriver {
             alarm: alarm,
             num_armed: Cell::new(0),

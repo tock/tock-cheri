@@ -29,7 +29,7 @@ pub struct VirtualMuxHmac<'a, A: digest::Digest<'a, L>, const L: usize> {
 impl<'a, A: digest::Digest<'a, L>, const L: usize> ListNode<'a, VirtualMuxHmac<'a, A, L>>
     for VirtualMuxHmac<'a, A, L>
 {
-    fn next(&self) -> &'a ListLink<VirtualMuxHmac<'a, A, L>> {
+    fn next(&self) -> &ListLink<'a, VirtualMuxHmac<'a, A, L>> {
         &self.next
     }
 }

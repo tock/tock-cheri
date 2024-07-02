@@ -6,14 +6,12 @@
 //! selected by a board.
 
 use core::cell::Cell;
-use core::ptr::NonNull;
 
-use crate::capabilities;
-use crate::config;
-use crate::debug;
+use crate::cheri::CPtrOps;
+use crate::config::CONFIG;
 use crate::dynamic_deferred_call::DynamicDeferredCall;
 use crate::errorcode::ErrorCode;
-use crate::grant::{AllowRoSize, AllowRwSize, Grant, UpcallSize};
+use crate::grant::{AllowRoSize, AllowRwSize, Grant, PLiveTracker, Track, UpcallSize};
 use crate::ipc;
 use crate::memop;
 use crate::platform::chip::Chip;
@@ -23,8 +21,8 @@ use crate::platform::platform::KernelResources;
 use crate::platform::platform::{ProcessFault, SyscallDriverLookup, SyscallFilter};
 use crate::platform::scheduler_timer::SchedulerTimer;
 use crate::platform::watchdog::WatchDog;
-use crate::process::ProcessId;
 use crate::process::{self, Task};
+use crate::process::{ProcessId, ProcessLoadError};
 use crate::scheduler::{Scheduler, SchedulingDecision};
 use crate::syscall::SyscallDriver;
 use crate::syscall::{ContextSwitchReason, SyscallReturn};
@@ -32,11 +30,67 @@ use crate::syscall::{Syscall, YieldCall};
 use crate::syscall_driver::CommandReturn;
 use crate::upcall::{Upcall, UpcallId};
 use crate::utilities::cells::NumericCellExt;
+use crate::utilities::singleton_checker::SingletonChecker;
+use crate::{assert_single, capabilities};
+use crate::{config, very_simple_component};
+use crate::{debug, TIfCfg};
 
 /// Threshold in microseconds to consider a process's timeslice to be exhausted.
 /// That is, Tock will skip re-scheduling a process if its remaining timeslice
 /// is less than this threshold.
 pub(crate) const MIN_QUANTA_THRESHOLD_US: u32 = 500;
+
+pub(crate) struct Counter {
+    grant_counter: Cell<usize>,
+
+    /// Flag to mark that grants have been finalized. This means that the kernel
+    /// cannot support creating new grants because processes have already been
+    /// created and the data structures for grants have already been established
+    /// Initialised only if config feature "static_init" is disabled
+    grants_finalized: Cell<bool>,
+}
+
+type StaticInitType = TIfCfg!(static_init, usize, Counter);
+pub(crate) struct StaticInit(StaticInitType);
+
+impl StaticInit {
+    const fn new(value: usize) -> Self {
+        if CONFIG.static_init {
+            StaticInit(StaticInitType::new_true(value))
+        } else {
+            StaticInit(StaticInitType::new_false(Counter {
+                grant_counter: Cell::new(value),
+                grants_finalized: Cell::new(true),
+            }))
+        }
+    }
+
+    fn get_grant_count(&self) -> usize {
+        if CONFIG.static_init {
+            *self.0.get_true_ref()
+        } else {
+            self.0.get_false_ref().grant_counter.get()
+        }
+    }
+
+    fn increment_grant_count(&self) {
+        if !CONFIG.static_init {
+            self.0.get_false_ref().grant_counter.increment();
+        }
+    }
+
+    fn get_grants_finalized(&self) -> bool {
+        if CONFIG.static_init {
+            true
+        } else {
+            self.0.get_false_ref().grants_finalized.get()
+        }
+    }
+
+    fn set_grants_finalized(&self) {
+        self.0.get_false_ref().grants_finalized.set(true);
+    }
+}
 
 /// Main object for the kernel. Each board will need to create one.
 pub struct Kernel {
@@ -45,7 +99,10 @@ pub struct Kernel {
     work: Cell<usize>,
 
     /// This holds a pointer to the static array of Process pointers.
-    processes: &'static [Option<&'static dyn process::Process>],
+    processes: &'static [ProcEntry],
+
+    /// Hom many slots are allocated in the processes array
+    processes_allocated: Cell<usize>,
 
     /// A counter which keeps track of how many process identifiers have been
     /// created. This is used to create new unique identifiers for processes.
@@ -54,13 +111,7 @@ pub struct Kernel {
     /// How many grant regions have been setup. This is incremented on every
     /// call to `create_grant()`. We need to explicitly track this so that when
     /// processes are created they can be allocated pointers for each grant.
-    grant_counter: Cell<usize>,
-
-    /// Flag to mark that grants have been finalized. This means that the kernel
-    /// cannot support creating new grants because processes have already been
-    /// created and the data structures for grants have already been
-    /// established.
-    grants_finalized: Cell<bool>,
+    grant_counter: StaticInit,
 }
 
 /// Enum used to inform scheduler why a process stopped executing (aka why
@@ -108,15 +159,132 @@ fn try_allocate_grant(driver: &dyn SyscallDriver, process: &dyn process::Process
     }
 }
 
+/// Prototype of a kernel. Should be used to initialise the main kernel object.
+///
+pub struct ProtoKernel {}
+
+/// The intent is for c to eventually be a const generic.
+/// `[generic_const_exprs]` was causing issues, so this has been converted back a dynamic value.
+pub struct GrantCounter(usize);
+
+impl ProtoKernel {
+    /// Construct a prototype of the kernel. Grants can be allocated using this, and then it can
+    /// later to converted into a true instantiation of the kernel.
+    pub const fn new(chk: &mut SingletonChecker) -> (Self, GrantCounter) {
+        assert_single!(chk);
+        (Self {}, GrantCounter(0))
+    }
+
+    pub const fn create_grant<
+        T: Default,
+        Upcalls: UpcallSize,
+        AllowROs: AllowRoSize,
+        AllowRWs: AllowRwSize,
+    >(
+        &self,
+        kernel: &'static Kernel,
+        driver_num: usize,
+        counter: GrantCounter,
+        _capability: &dyn capabilities::MemoryAllocationCapability,
+    ) -> (Grant<T, Upcalls, AllowROs, AllowRWs>, GrantCounter) {
+        (
+            Grant::new(kernel, driver_num, counter.0),
+            GrantCounter(counter.0 + 1),
+        )
+    }
+}
+
+/// Holds both the process ID in a location that can outlive a process, and an optional reference to
+/// that process. Valid_proc_id needs to outlive the proc_ref to not make dangling pointers to
+/// grants. The usize is set to ~0 to indicate accessing process memory no longer valid, even if the
+/// optional is still SOME.
+#[derive(Clone)]
+pub struct ProcEntry {
+    pub valid_proc_id: Cell<usize>,
+    pub proc_ref: Cell<Option<&'static dyn process::Process>>,
+}
+
+pub(crate) const ID_INVALID: usize = !0usize;
+
+/// The type each board should allocate to hold processes. Boards should use this type, and use
+/// init_process_array to create an array so they don't need to pay too much attention to what this
+/// type actually is.
+pub type ProcessArray<const NUM_PROCS: usize> = [ProcEntry; NUM_PROCS];
+
+very_simple_component!(impl for Kernel,
+    new_from_proto(&'static [ProcEntry], GrantCounter)
+);
+
 impl Kernel {
-    pub fn new(processes: &'static [Option<&'static dyn process::Process>]) -> Kernel {
+    pub const fn new(processes: &'static [ProcEntry]) -> Kernel {
         Kernel {
             work: Cell::new(0),
             processes,
+            processes_allocated: Cell::new(0),
             process_identifier_max: Cell::new(0),
-            grant_counter: Cell::new(0),
-            grants_finalized: Cell::new(false),
+            grant_counter: StaticInit::new(0),
         }
+    }
+
+    pub const fn new_from_proto(processes: &'static [ProcEntry], counter: GrantCounter) -> Kernel {
+        Kernel {
+            work: Cell::new(0),
+            processes,
+            processes_allocated: Cell::new(0),
+            process_identifier_max: Cell::new(0),
+            grant_counter: StaticInit::new(counter.0),
+        }
+    }
+
+    /// Create an empty array of processes required to construct a new kernel type
+    pub const fn init_process_array<const NUM_PROCS: usize>() -> ProcessArray<NUM_PROCS> {
+        const INVALID_ENTRY: ProcEntry = ProcEntry {
+            valid_proc_id: Cell::new(ID_INVALID),
+            proc_ref: Cell::new(None),
+        };
+        [INVALID_ENTRY; NUM_PROCS]
+    }
+
+    pub(crate) fn get_next_free_proc_entry(&self) -> Result<usize, ProcessLoadError> {
+        let n = self.processes_allocated.get();
+        if n != self.processes.len() {
+            Ok(n)
+        } else {
+            Err(ProcessLoadError::NotEnoughMemory)
+        }
+    }
+
+    pub(crate) fn set_next_proc_entry_used(
+        &self,
+        proc: &'static dyn process::Process,
+    ) -> Result<(), ProcessLoadError> {
+        let index = self.processes_allocated.get();
+        debug_assert_eq!(index, proc.processid().index);
+
+        let slot = self
+            .processes
+            .get(index)
+            .ok_or(ProcessLoadError::NotEnoughMemory)?;
+
+        // Save the reference to this process in the processes array.
+        slot.proc_ref.set(Some(proc));
+        slot.valid_proc_id.set(proc.processid().id());
+        self.processes_allocated
+            .set(self.processes_allocated.get() + 1);
+        Ok(())
+    }
+
+    pub(crate) fn index_of_proc_entry(&self, entry: &ProcEntry) -> usize {
+        unsafe {
+            (entry as *const ProcEntry).offset_from(&self.processes[0] as *const ProcEntry) as usize
+        }
+    }
+
+    /// Helper to get an iterator over just the & dyn Process part of the process array
+    /// This will also return the invalid entries.
+    /// Use get_process_iter to get only the valid entries
+    fn proc_iter(&self) -> impl Iterator<Item = &Cell<Option<&'static dyn process::Process>>> {
+        self.processes.iter().map(|entry| &entry.proc_ref)
     }
 
     /// Something was scheduled for a process, so there is more work to do.
@@ -146,6 +314,10 @@ impl Kernel {
         self.work.decrement();
     }
 
+    pub(crate) fn decrement_work_by(&self, by: usize) {
+        self.work.subtract(by);
+    }
+
     /// Something finished for a process, so we decrement how much work there is
     /// to do.
     ///
@@ -165,6 +337,57 @@ impl Kernel {
         self.work.get() == 0
     }
 
+    /// Look up a process id from the the usize identifier, with an optional index as to what
+    /// its index is. Returns None if the ID does not exist, or the hint was wrong.
+    pub(crate) fn lookup_process_id(
+        &'static self,
+        id: usize,
+        index_hint: Option<usize>,
+    ) -> Option<ProcessId> {
+        // Check for the special value which is not really a valid process ID
+        if id == ID_INVALID {
+            return None;
+        }
+        match index_hint {
+            Some(ndx) => {
+                let result = ProcessId::new(self, id, ndx);
+                match result.index() {
+                    None => None,
+                    Some(_) => Some(result),
+                }
+            }
+            None => {
+                for entry in self.processes.iter() {
+                    if entry.valid_proc_id.get() == id {
+                        if let Some(proc) = entry.proc_ref.get() {
+                            return Some(proc.processid());
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Returns a reference to the process entry, if valid. This is only for grants to have a faster
+    /// path. Other users should use get_process.
+    pub(crate) fn get_process_entry(&self, processid: ProcessId) -> Option<&ProcEntry> {
+        let id = processid.id();
+        let entry = self.processes.get(processid.index)?;
+        if entry.valid_proc_id.get() == id {
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn get_live_tracker_for(&self, processid: ProcessId) -> PLiveTracker {
+        match self.processes.get(processid.index) {
+            None => PLiveTracker::global_dead(),
+            Some(entry) => PLiveTracker::new_with_id(entry, processid.id()),
+        }
+    }
+
     /// Helper function that moves all non-generic portions of process_map_or
     /// into a non-generic function to reduce code bloat from monomorphization.
     pub(crate) fn get_process(&self, processid: ProcessId) -> Option<&dyn process::Process> {
@@ -172,16 +395,14 @@ impl Kernel {
         // However, we are not guaranteed that the app still exists at that
         // index in the processes array. To avoid additional overhead, we do the
         // lookup and check here, rather than calling `.index()`.
+        let check_id = processid.id();
         match self.processes.get(processid.index) {
-            Some(Some(process)) => {
-                // Check that the process stored here matches the identifier
-                // in the `appid`.
-                if process.processid() == processid {
-                    Some(*process)
-                } else {
-                    None
-                }
-            }
+            // Check that the process stored here matches the identifier
+            // in the `appid`.
+            Some(ProcEntry {
+                valid_proc_id: id,
+                proc_ref: proc,
+            }) if id.get() == check_id => proc.get(),
             _ => None,
         }
     }
@@ -242,29 +463,37 @@ impl Kernel {
     where
         F: FnMut(&dyn process::Process),
     {
-        for process in self.processes.iter() {
-            match process {
+        for process in self.proc_iter() {
+            match process.get() {
                 Some(p) => {
-                    closure(*p);
+                    closure(p);
                 }
                 None => {}
             }
         }
     }
 
+    pub(crate) fn get_proc_entry_iter(&self) -> impl Iterator<Item = &'static ProcEntry> {
+        fn filter(item: &'static ProcEntry) -> Option<&'static ProcEntry> {
+            if item.valid_proc_id.get() != ID_INVALID {
+                Some(item)
+            } else {
+                None
+            }
+        }
+        self.processes.iter().filter_map(filter)
+    }
+
     /// Returns an iterator over all processes loaded by the kernel
     pub(crate) fn get_process_iter(
         &self,
-    ) -> core::iter::FilterMap<
-        core::slice::Iter<Option<&dyn process::Process>>,
-        fn(&Option<&'static dyn process::Process>) -> Option<&'static dyn process::Process>,
-    > {
+    ) -> impl Iterator<Item = &'static dyn process::Process> + '_ {
         fn keep_some(
-            &x: &Option<&'static dyn process::Process>,
+            x: &Cell<Option<&'static dyn process::Process>>,
         ) -> Option<&'static dyn process::Process> {
-            x
+            x.get()
         }
-        self.processes.iter().filter_map(keep_some)
+        self.proc_iter().filter_map(keep_some)
     }
 
     /// Run a closure on every valid process. This will iterate the array of
@@ -276,31 +505,24 @@ impl Kernel {
     pub fn process_each_capability<F>(
         &'static self,
         _capability: &dyn capabilities::ProcessManagementCapability,
-        mut closure: F,
+        closure: F,
     ) where
         F: FnMut(&dyn process::Process),
     {
-        for process in self.processes.iter() {
-            match process {
-                Some(p) => {
-                    closure(*p);
-                }
-                None => {}
-            }
-        }
+        self.process_each(closure)
     }
 
     /// Run a closure on every process, but only continue if the closure returns `None`. That is,
     /// if the closure returns any non-`None` value, iteration stops and the value is returned from
     /// this function to the called.
-    pub(crate) fn process_until<T, F>(&self, closure: F) -> Option<T>
+    pub(crate) fn process_until<T, F>(&self, mut closure: F) -> Option<T>
     where
-        F: Fn(&dyn process::Process) -> Option<T>,
+        F: FnMut(&dyn process::Process) -> Option<T>,
     {
-        for process in self.processes.iter() {
-            match process {
+        for process in self.proc_iter() {
+            match process.get() {
                 Some(p) => {
-                    let ret = closure(*p);
+                    let ret = closure(p);
                     if ret.is_some() {
                         return ret;
                     }
@@ -318,9 +540,9 @@ impl Kernel {
     /// This is needed for `ProcessId` itself to implement the `.index()` command to
     /// verify that the referenced app is still at the correct index.
     pub(crate) fn processid_is_valid(&self, appid: &ProcessId) -> bool {
-        self.processes.get(appid.index).map_or(false, |p| {
-            p.map_or(false, |process| process.processid().id() == appid.id())
-        })
+        self.processes
+            .get(appid.index)
+            .map_or(false, |p| p.valid_proc_id.get() == appid.id())
     }
 
     /// Create a new grant. This is used in board initialization to setup grants
@@ -344,13 +566,13 @@ impl Kernel {
         driver_num: usize,
         _capability: &dyn capabilities::MemoryAllocationCapability,
     ) -> Grant<T, Upcalls, AllowROs, AllowRWs> {
-        if self.grants_finalized.get() {
+        if self.grant_counter.get_grants_finalized() {
             panic!("Grants finalized. Cannot create a new grant.");
         }
 
         // Create and return a new grant.
-        let grant_index = self.grant_counter.get();
-        self.grant_counter.increment();
+        let grant_index = self.grant_counter.get_grant_count();
+        self.grant_counter.increment_grant_count();
         Grant::new(self, driver_num, grant_index)
     }
 
@@ -362,8 +584,8 @@ impl Kernel {
     /// In practice, this is called when processes are created, and the process
     /// memory is setup based on the number of current grants.
     pub(crate) fn get_grant_count_and_finalize(&self) -> usize {
-        self.grants_finalized.set(true);
-        self.grant_counter.get()
+        self.grant_counter.set_grants_finalized();
+        self.grant_counter.get_grant_count()
     }
 
     /// Returns the number of grants that have been setup in the system and
@@ -403,8 +625,8 @@ impl Kernel {
     /// function, since capsules should not be able to arbitrarily restart all
     /// apps.
     pub fn hardfault_all_apps<C: capabilities::ProcessManagementCapability>(&self, _c: &C) {
-        for p in self.processes.iter() {
-            p.map(|process| {
+        for p in self.proc_iter() {
+            p.get().map(|process| {
                 process.set_fault_state();
             });
         }
@@ -620,7 +842,7 @@ impl Kernel {
                     scheduler_timer.arm();
                     let context_switch_reason = process.switch_to();
                     scheduler_timer.disarm();
-                    chip.mpu().disable_app_mpu();
+                    process.disable_mmu();
 
                     // Now the process has returned back to the kernel. Check
                     // why and handle the process as appropriate.
@@ -822,7 +1044,16 @@ impl Kernel {
             }
             Syscall::Yield { which, address } => {
                 if config::CONFIG.trace_syscalls {
-                    debug!("[{:?}] yield. which: {}", process.processid(), which);
+                    debug!(
+                        "[{:?}] yield. which: {} ({})",
+                        process.processid(),
+                        which,
+                        match which {
+                            0 => "no wait",
+                            1 => "wait",
+                            _ => "inval",
+                        }
+                    );
                 }
                 if which > (YieldCall::Wait as usize) {
                     // Only 0 and 1 are valid, so this is not a valid yield
@@ -886,14 +1117,15 @@ impl Kernel {
                             subscribe_num: subdriver_number,
                         };
 
+                        // TODO: when the compiler supports capability types bring this back
                         // First check if `upcall_ptr` is null. A null `upcall_ptr` will
                         // result in `None` here and represents the special
                         // "unsubscribe" operation.
-                        let ptr = NonNull::new(upcall_ptr);
+                        // let ptr = NonNull::new(upcall_ptr);
 
                         // For convenience create an `Upcall` type now. This is just a
                         // data structure and doesn't do any checking or conversion.
-                        let upcall = Upcall::new(process.processid(), upcall_id, appdata, ptr);
+                        let upcall = Upcall::new(process.processid(), upcall_id, appdata, upcall_ptr);
 
                         // If `ptr` is not null, we must first verify that the upcall
                         // function pointer is within process accessible memory. Per
@@ -902,12 +1134,18 @@ impl Kernel {
                         // > If the passed upcall is not valid (is outside process
                         // > executable memory...), the kernel...MUST immediately return
                         // > a failure with a error code of `INVALID`.
-                        let rval1 = ptr.map_or(None, |upcall_ptr_nonnull| {
-                            if !process.is_valid_upcall_function_pointer(upcall_ptr_nonnull) {
-                                Some(ErrorCode::INVAL)
-                            } else {
-                                None
-                            }
+
+                        // CHERI note: we don't do any CHERI checks here because the architecture
+                        // does them for us. The checks are only needed if we convert a capability into
+                        // an integer pointer.
+                        let rval1 = upcall_ptr.map_or(None, |upcall_ptr_nonnull| {
+                            if !process
+                                .is_valid_upcall_function_pointer(upcall_ptr_nonnull.as_ptr() as *const u8)
+                                {
+                                    Some(ErrorCode::INVAL)
+                                } else {
+                                    None
+                                }
                         });
 
                         // If the upcall is either null or valid, then we continue
@@ -1002,7 +1240,7 @@ impl Kernel {
                                 process.processid(),
                                 driver_number,
                                 subdriver_number,
-                                upcall_ptr as usize,
+                                upcall_ptr,
                                 appdata,
                                 rval
                             );
@@ -1060,7 +1298,7 @@ impl Kernel {
                                             rw_pbuf,
                                         ) {
                                             Ok(rw_pbuf) => {
-                                                let (ptr, len) = rw_pbuf.consume();
+                                                let (ptr, len, _) = rw_pbuf.consume();
                                                 SyscallReturn::AllowReadWriteSuccess(ptr, len)
                                             }
                                             Err((rw_pbuf, err @ ErrorCode::NOMEM)) => {
@@ -1078,13 +1316,13 @@ impl Kernel {
                                                             rw_pbuf,
                                                         ) {
                                                             Ok(rw_pbuf) => {
-                                                                let (ptr, len) = rw_pbuf.consume();
+                                                                let (ptr, len, _) = rw_pbuf.consume();
                                                                 SyscallReturn::AllowReadWriteSuccess(
                                                                     ptr, len,
                                                                 )
                                                             }
                                                             Err((rw_pbuf, err)) => {
-                                                                let (ptr, len) = rw_pbuf.consume();
+                                                                let (ptr, len, _) = rw_pbuf.consume();
                                                                 SyscallReturn::AllowReadWriteFailure(
                                                                     err, ptr, len,
                                                                 )
@@ -1108,7 +1346,7 @@ impl Kernel {
                                                             }
                                                             _ => {}
                                                         }
-                                                        let (ptr, len) = rw_pbuf.consume();
+                                                        let (ptr, len, _) = rw_pbuf.consume();
                                                         SyscallReturn::AllowReadWriteFailure(
                                                             err, ptr, len,
                                                         )
@@ -1116,7 +1354,7 @@ impl Kernel {
                                                 }
                                             }
                                             Err((rw_pbuf, err)) => {
-                                                let (ptr, len) = rw_pbuf.consume();
+                                                let (ptr, len, _) = rw_pbuf.consume();
                                                 SyscallReturn::AllowReadWriteFailure(err, ptr, len)
                                             }
                                         }
@@ -1182,7 +1420,7 @@ impl Kernel {
                                                 // allow operation. Pass the
                                                 // previous buffer information back
                                                 // to the process.
-                                                let (ptr, len) = returned_pbuf.consume();
+                                                let (ptr, len, _) = returned_pbuf.consume();
                                                 SyscallReturn::UserspaceReadableAllowSuccess(
                                                     ptr, len,
                                                 )
@@ -1192,7 +1430,7 @@ impl Kernel {
                                                 // allow operation. Pass the new
                                                 // buffer information back to the
                                                 // process.
-                                                let (ptr, len) = rejected_pbuf.consume();
+                                                let (ptr, len, _) = rejected_pbuf.consume();
                                                 SyscallReturn::UserspaceReadableAllowFailure(
                                                     err, ptr, len,
                                                 )
@@ -1256,7 +1494,7 @@ impl Kernel {
                                             ro_pbuf,
                                         ) {
                                             Ok(ro_pbuf) => {
-                                                let (ptr, len) = ro_pbuf.consume();
+                                                let (ptr, len, _) = ro_pbuf.consume();
                                                 SyscallReturn::AllowReadOnlySuccess(ptr, len)
                                             }
                                             Err((ro_pbuf, err @ ErrorCode::NOMEM)) => {
@@ -1274,13 +1512,13 @@ impl Kernel {
                                                             ro_pbuf,
                                                         ) {
                                                             Ok(ro_pbuf) => {
-                                                                let (ptr, len) = ro_pbuf.consume();
+                                                                let (ptr, len, _) = ro_pbuf.consume();
                                                                 SyscallReturn::AllowReadOnlySuccess(
                                                                     ptr, len,
                                                                 )
                                                             }
                                                             Err((ro_pbuf, err)) => {
-                                                                let (ptr, len) = ro_pbuf.consume();
+                                                                let (ptr, len, _) = ro_pbuf.consume();
                                                                 SyscallReturn::AllowReadOnlyFailure(
                                                                     err, ptr, len,
                                                                 )
@@ -1304,7 +1542,7 @@ impl Kernel {
                                                             }
                                                             _ => {}
                                                         }
-                                                        let (ptr, len) = ro_pbuf.consume();
+                                                        let (ptr, len, _) = ro_pbuf.consume();
                                                         SyscallReturn::AllowReadOnlyFailure(
                                                             err, ptr, len,
                                                         )
@@ -1312,7 +1550,7 @@ impl Kernel {
                                                 }
                                             }
                                             Err((ro_pbuf, err)) => {
-                                                let (ptr, len) = ro_pbuf.consume();
+                                                let (ptr, len, _) = ro_pbuf.consume();
                                                 SyscallReturn::AllowReadOnlyFailure(err, ptr, len)
                                             }
                                         }
@@ -1362,15 +1600,26 @@ impl Kernel {
             Syscall::Exit {
                 which,
                 completion_code,
-            } => match which {
-                // The process called the `exit-terminate` system call.
-                0 => process.terminate(Some(completion_code as u32)),
-                // The process called the `exit-restart` system call.
-                1 => process.try_restart(Some(completion_code as u32)),
-                // The process called an invalid variant of the Exit
-                // system call class.
-                _ => process.set_syscall_return_value(SyscallReturn::Failure(ErrorCode::NOSUPPORT)),
-            },
+            } => {
+                if config::CONFIG.trace_syscalls {
+                    debug!(
+                        "[{:?}] syscall EXIT {} {}",
+                        process.processid(),
+                        which,
+                        completion_code
+                    );
+                };
+                match which {
+                    // The process called the `exit-terminate` system call.
+                    0 => process.terminate(Some(completion_code as u32)),
+                    // The process called the `exit-restart` system call.
+                    1 => process.try_restart(Some(completion_code as u32)),
+                    // The process called an invalid variant of the Exit
+                    // system call class.
+                    _ => process
+                        .set_syscall_return_value(SyscallReturn::Failure(ErrorCode::NOSUPPORT)),
+                }
+            }
         }
     }
 }

@@ -8,6 +8,7 @@ edition = "2021"
 tock-registers = { path = "../libraries/tock-register-interface" }
 tock-cells = { path = "../libraries/tock-cells" }
 tock-tbf = { path = "../libraries/tock-tbf" }
+misc = { path = "../libraries/misc" }
 
 # In general, Tock discourages the use of cargo features. However for certain
 # kernel crate configuration, we have not found reasonable alternatives to
@@ -29,3 +30,5 @@ tock-tbf = { path = "../libraries/tock-tbf" }
 trace_syscalls = []
 debug_load_processes = []
 no_debug_panics = []
+counted_grant_refs = []
+use_static_init = []

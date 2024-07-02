@@ -914,7 +914,7 @@ impl<'a, A: AES128<'a> + AES128Ctr + AES128CBC + AES128ECB> symmetric_encryption
 impl<'a, A: AES128<'a> + AES128Ctr + AES128CBC + AES128ECB> ListNode<'a, VirtualAES128CCM<'a, A>>
     for VirtualAES128CCM<'a, A>
 {
-    fn next(&'a self) -> &'a ListLink<'a, VirtualAES128CCM<'a, A>> {
+    fn next(&self) -> &ListLink<'a, VirtualAES128CCM<'a, A>> {
         &self.next
     }
 }

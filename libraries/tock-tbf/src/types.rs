@@ -1,5 +1,6 @@
 //! Types and Data Structures for TBFs.
 
+use crate::types::TbfHeader::Padding;
 use core::convert::TryInto;
 use core::fmt;
 use core::mem::size_of;
@@ -517,10 +518,10 @@ pub enum CommandPermissions {
 /// four since we need to statically know the length of the array to store in
 /// this type.
 #[derive(Clone, Copy, Debug)]
-pub struct TbfHeaderV2 {
+pub struct TbfHeaderV2<'a> {
     pub(crate) base: TbfHeaderV2Base,
     pub(crate) main: Option<TbfHeaderV2Main>,
-    pub(crate) package_name: Option<&'static str>,
+    pub(crate) package_name: Option<&'a str>,
     pub(crate) writeable_regions: Option<[Option<TbfHeaderV2WriteableFlashRegion>; 4]>,
     pub(crate) fixed_addresses: Option<TbfHeaderV2FixedAddresses>,
     pub(crate) permissions: Option<TbfHeaderV2Permissions<8>>,
@@ -535,12 +536,30 @@ pub struct TbfHeaderV2 {
 /// The kernel can also use this header to keep persistent state about
 /// the application.
 #[derive(Debug)]
-pub enum TbfHeader {
-    TbfHeaderV2(TbfHeaderV2),
+pub enum TbfHeader<'a> {
+    TbfHeaderV2(TbfHeaderV2<'a>),
     Padding(TbfHeaderV2Base),
 }
 
-impl TbfHeader {
+impl<'a> TbfHeader<'a> {
+    /// Return a static version of the header.
+    /// Must provide a string with static lifetime to replace the name.
+    pub fn into_static(&self, name: Option<&'static str>) -> TbfHeader<'static> {
+        match self {
+            TbfHeader::TbfHeaderV2(header) => crate::types::TbfHeader::TbfHeaderV2(TbfHeaderV2 {
+                base: header.base,
+                main: header.main,
+                package_name: name,
+                writeable_regions: header.writeable_regions,
+                fixed_addresses: header.fixed_addresses,
+                permissions: header.permissions,
+                persistent_acls: header.persistent_acls,
+                kernel_version: header.kernel_version,
+            }),
+            TbfHeader::Padding(p) => Padding(*p),
+        }
+    }
+
     /// Return whether this is an app or just padding between apps.
     pub fn is_app(&self) -> bool {
         match *self {
@@ -594,7 +613,7 @@ impl TbfHeader {
     }
 
     /// Get the name of the app.
-    pub fn get_package_name(&self) -> Option<&'static str> {
+    pub fn get_package_name(&self) -> Option<&'a str> {
         match *self {
             TbfHeader::TbfHeaderV2(hd) => hd.package_name,
             _ => None,
@@ -613,13 +632,13 @@ impl TbfHeader {
     }
 
     /// Get the offset and size of a given flash region.
-    pub fn get_writeable_flash_region(&self, index: usize) -> (u32, u32) {
+    pub fn get_writeable_flash_region(&self, index: usize) -> (usize, usize) {
         match *self {
             TbfHeader::TbfHeaderV2(hd) => hd.writeable_regions.map_or((0, 0), |wrs| {
                 wrs.get(index).unwrap_or(&None).map_or((0, 0), |wr| {
                     (
-                        wr.writeable_flash_region_offset,
-                        wr.writeable_flash_region_size,
+                        wr.writeable_flash_region_offset as usize,
+                        wr.writeable_flash_region_size as usize,
                     )
                 })
             }),

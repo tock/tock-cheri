@@ -1,37 +1,73 @@
 //! Kernel-userland system call interface for RISC-V architecture.
 
 use core::convert::TryInto;
-use core::fmt::Write;
+use core::fmt::{Display, Formatter, Write};
 use core::mem::size_of;
 use core::ops::Range;
 
 use crate::csr::mcause;
 use kernel;
+use kernel::cheri::*;
 use kernel::errorcode::ErrorCode;
 use kernel::syscall::ContextSwitchReason;
+
+// Sadly, CHERI macros are not namespaced
+use kernel::utilities::singleton_checker::SingletonChecker;
+use kernel::*;
 
 /// This holds all of the state that the kernel must keep for the process when
 /// the process is not executing.
 #[derive(Default)]
 #[repr(C)]
-pub struct Riscv32iStoredState {
+pub struct RiscvStoredState {
     /// Store all of the app registers.
-    regs: [u32; 31],
+    regs: [cptr; 31],
 
     /// This holds the PC value of the app when the exception/syscall/interrupt
     /// occurred. We also use this to set the PC that the app should start
     /// executing at when it is resumed/started.
-    pc: u32,
+    pc: cptr,
+
+    /// This holds the default data capability. Switched with the kernel DDC if we trap from an app.
+    #[cfg(target_feature = "xcheri")]
+    ddc: cptr,
 
     /// We need to store the mcause CSR between when the trap occurs and after
     /// we exit the trap handler and resume the context switching code.
-    mcause: u32,
+    mcause: usize,
 
     /// We need to store the mtval CSR for the process in case the mcause
     /// indicates a fault. In that case, the mtval contains useful debugging
     /// information.
-    mtval: u32,
+    mtval: usize,
 }
+
+pub struct DdcDisplay<'a> {
+    _state: &'a RiscvStoredState,
+}
+
+impl<'a> Display for DdcDisplay<'a> {
+    fn fmt(&self, _f: &mut Formatter<'_>) -> core::fmt::Result {
+        #[cfg(target_feature = "xcheri")]
+        {
+            return _f.write_fmt(format_args!("DDC: {:#010X}", self._state.ddc));
+        }
+        #[cfg(not(target_feature = "xcheri"))]
+        core::fmt::Result::Ok(())
+    }
+}
+
+impl RiscvStoredState {
+    pub fn get_ddc_display(&self) -> DdcDisplay {
+        DdcDisplay { _state: self }
+    }
+}
+
+// Because who would ever need offsetof?
+#[cfg(target_feature = "xcheri")]
+pub const CAUSE_OFFSET: usize = size_of::<cptr>() * 33;
+#[cfg(not(target_feature = "xcheri"))]
+pub const CAUSE_OFFSET: usize = size_of::<cptr>() * 32;
 
 // Named offsets into the stored state registers.  These needs to be kept in
 // sync with the register save logic in _start_trap() as well as the register
@@ -45,10 +81,15 @@ const R_A3: usize = 12;
 const R_A4: usize = 13;
 
 /// Values for encoding the stored state buffer in a binary slice.
-const VERSION: u32 = 1;
-const STORED_STATE_SIZE: u32 = size_of::<Riscv32iStoredState>() as u32;
+const VERSION: usize = 1;
+const STORED_STATE_SIZE: usize = size_of::<RiscvStoredState>() as usize;
+#[cfg(any(target_arch = "riscv32"))]
 const TAG: [u8; 4] = [b'r', b'v', b'5', b'i'];
+#[cfg(any(target_arch = "riscv64", not(target_os = "none")))]
+const TAG: [u8; 8] = [b'r', b'v', b'5', b'i', b'r', b'v', b'5', b'i'];
 const METADATA_LEN: usize = 3;
+
+// TODO: CHERI. This seems to be for swap or some such. Needs thinking about.
 
 const VERSION_IDX: usize = 0;
 const SIZE_IDX: usize = 1;
@@ -59,14 +100,14 @@ const MTVAL_IDX: usize = 5;
 const REGS_IDX: usize = 6;
 const REGS_RANGE: Range<usize> = REGS_IDX..REGS_IDX + 31;
 
-const U32_SZ: usize = size_of::<u32>();
-fn u32_byte_range(index: usize) -> Range<usize> {
-    index * U32_SZ..(index + 1) * U32_SZ
+const USIZE_SZ: usize = size_of::<usize>();
+fn usize_byte_range(index: usize) -> Range<usize> {
+    index * USIZE_SZ..(index + 1) * USIZE_SZ
 }
 
-fn u32_from_u8_slice(slice: &[u8], index: usize) -> Result<u32, ErrorCode> {
-    let range = u32_byte_range(index);
-    Ok(u32::from_le_bytes(
+fn usize_from_u8_slice(slice: &[u8], index: usize) -> Result<usize, ErrorCode> {
+    let range = usize_byte_range(index);
+    Ok(usize::from_le_bytes(
         slice
             .get(range)
             .ok_or(ErrorCode::SIZE)?
@@ -75,27 +116,29 @@ fn u32_from_u8_slice(slice: &[u8], index: usize) -> Result<u32, ErrorCode> {
     ))
 }
 
-fn write_u32_to_u8_slice(val: u32, slice: &mut [u8], index: usize) {
-    let range = u32_byte_range(index);
+fn write_usize_to_u8_slice(val: usize, slice: &mut [u8], index: usize) {
+    let range = usize_byte_range(index);
     slice[range].copy_from_slice(&val.to_le_bytes());
 }
 
-impl core::convert::TryFrom<&[u8]> for Riscv32iStoredState {
+impl core::convert::TryFrom<&[u8]> for RiscvStoredState {
     type Error = ErrorCode;
-    fn try_from(ss: &[u8]) -> Result<Riscv32iStoredState, Self::Error> {
-        if ss.len() == size_of::<Riscv32iStoredState>() + METADATA_LEN * U32_SZ
-            && u32_from_u8_slice(ss, VERSION_IDX)? == VERSION
-            && u32_from_u8_slice(ss, SIZE_IDX)? == STORED_STATE_SIZE
-            && u32_from_u8_slice(ss, TAG_IDX)? == u32::from_le_bytes(TAG)
+    fn try_from(ss: &[u8]) -> Result<RiscvStoredState, Self::Error> {
+        if ss.len() == size_of::<RiscvStoredState>() + METADATA_LEN * USIZE_SZ
+            && usize_from_u8_slice(ss, VERSION_IDX)? == VERSION
+            && usize_from_u8_slice(ss, SIZE_IDX)? == STORED_STATE_SIZE
+            && usize_from_u8_slice(ss, TAG_IDX)? == usize::from_le_bytes(TAG)
         {
-            let mut res = Riscv32iStoredState {
-                regs: [0; 31],
-                pc: u32_from_u8_slice(ss, PC_IDX)?,
-                mcause: u32_from_u8_slice(ss, MCAUSE_IDX)?,
-                mtval: u32_from_u8_slice(ss, MTVAL_IDX)?,
+            let mut res = RiscvStoredState {
+                regs: [0usize.into(); 31],
+                pc: (usize_from_u8_slice(ss, PC_IDX)? as usize).into(),
+                #[cfg(target_feature = "xcheri")]
+                ddc: 0usize.into(),
+                mcause: usize_from_u8_slice(ss, MCAUSE_IDX)?,
+                mtval: usize_from_u8_slice(ss, MTVAL_IDX)?,
             };
             for (i, v) in (REGS_RANGE).enumerate() {
-                res.regs[i] = u32_from_u8_slice(ss, v)?;
+                res.regs[i] = (usize_from_u8_slice(ss, v)? as usize).into();
             }
             Ok(res)
         } else {
@@ -111,10 +154,16 @@ impl SysCall {
     pub const unsafe fn new() -> SysCall {
         SysCall(())
     }
+    pub const fn const_new(chk: &mut SingletonChecker) -> Self {
+        assert_single!(chk);
+        Self(())
+    }
 }
 
+kernel::very_simple_component!(impl for SysCall, const_new(&'a mut SingletonChecker));
+
 impl kernel::syscall::UserspaceKernelBoundary for SysCall {
-    type StoredState = Riscv32iStoredState;
+    type StoredState = RiscvStoredState;
 
     fn initial_process_app_brk_size(&self) -> usize {
         // The RV32I UKB implementation does not use process memory for any
@@ -131,18 +180,43 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
         state: &mut Self::StoredState,
     ) -> Result<(), ()> {
         // Need to clear the stored state when initializing.
-        state.regs.iter_mut().for_each(|x| *x = 0);
-        state.pc = 0;
+        state.regs.iter_mut().for_each(|x| *x = usize::into(0));
+        // CHERI note: this PC cannot be executed. It will always be replaced with an initial fn.
+        state.pc = usize::into(0);
+        #[cfg(target_feature = "xcheri")]
+        {
+            let start = accessible_memory_start as usize;
+
+            state
+                .ddc
+                .set_addr_from_ddc_restricted(start, start, (_app_brk as usize) - start);
+        }
+
         state.mcause = 0;
 
         // The first time the process runs we need to set the initial stack
         // pointer in the sp register.
         //
         // We do not pre-allocate any stack for RV32I processes.
-        state.regs[R_SP] = accessible_memory_start as u32;
+        state.regs[R_SP] = usize::into(accessible_memory_start as usize);
 
         // We do not use memory for UKB, so just return ok.
         Ok(())
+    }
+
+    unsafe fn get_extra_syscall_arg(
+        &self,
+        ndx: usize,
+        _accessible_memory_start: *const u8,
+        _app_brk: *const u8,
+        state: &Self::StoredState,
+    ) -> Option<usize> {
+        // A4 was the last argument used by the standard syscall. We can get at least another 3,
+        // and then we might want to go to the stack.
+        if ndx >= 3 {
+            return None;
+        }
+        Some(state.regs[R_A4 + 1 + ndx].into())
     }
 
     unsafe fn set_syscall_return_value(
@@ -170,7 +244,9 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
         let (a1slice, r) = r.split_at_mut(R_A2 - R_A1);
         let (a2slice, a3slice) = r.split_at_mut(R_A3 - R_A2);
 
-        return_value.encode_syscall_return(
+        // Really we need to write out own version of this that zeros other bits
+        // Then the above ugly coerce would not be needed
+        return_value.encode_syscall_return_cptr(
             &mut a0slice[0],
             &mut a1slice[0],
             &mut a2slice[0],
@@ -185,15 +261,15 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
         &self,
         _accessible_memory_start: *const u8,
         _app_brk: *const u8,
-        state: &mut Riscv32iStoredState,
+        state: &mut RiscvStoredState,
         callback: kernel::process::FunctionCall,
     ) -> Result<(), ()> {
         // Set the register state for the application when it starts
         // executing. These are the argument registers.
-        state.regs[R_A0] = callback.argument0 as u32;
-        state.regs[R_A1] = callback.argument1 as u32;
-        state.regs[R_A2] = callback.argument2 as u32;
-        state.regs[R_A3] = callback.argument3 as u32;
+        state.regs[R_A0] = callback.argument0.into();
+        state.regs[R_A1] = callback.argument1.into();
+        state.regs[R_A2] = callback.argument2.into();
+        state.regs[R_A3] = callback.argument3.into();
 
         // We also need to set the return address (ra) register so that the new
         // function that the process is running returns to the correct location.
@@ -201,21 +277,22 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
         // process is executing then `state.pc` is invalid/useless, but the
         // application must ignore it anyway since there is nothing logically
         // for it to return to. So this doesn't hurt anything.
-        state.regs[R_RA] = state.pc as u32;
+        state.regs[R_RA] = state.pc;
 
         // Save the PC we expect to execute.
-        state.pc = callback.pc as u32;
+        // On CHERI we are basically forcing a jump, so caller better have the correct bounds.
+        state.pc = callback.pc;
 
         Ok(())
     }
 
     // Mock implementation for tests on Travis-CI.
-    #[cfg(not(any(target_arch = "riscv32", target_os = "none")))]
+    #[cfg(not(any(target_os = "none")))]
     unsafe fn switch_to_process(
         &self,
         _accessible_memory_start: *const u8,
         _app_brk: *const u8,
-        _state: &mut Riscv32iStoredState,
+        _state: &mut RiscvStoredState,
     ) -> (ContextSwitchReason, Option<*const u8>) {
         // Convince lint that 'mcause' and 'R_A4' are used during test build
         let _cause = mcause::Trap::from(_state.mcause as usize);
@@ -223,14 +300,13 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
         unimplemented!()
     }
 
-    #[cfg(all(target_arch = "riscv32", target_os = "none"))]
+    #[cfg(all(target_os = "none"))]
     unsafe fn switch_to_process(
         &self,
         _accessible_memory_start: *const u8,
         _app_brk: *const u8,
-        state: &mut Riscv32iStoredState,
+        state: &mut RiscvStoredState,
     ) -> (ContextSwitchReason, Option<*const u8>) {
-        use core::arch::asm;
         // We need to ensure that the compiler does not reorder
         // kernel memory writes to after the userspace context switch
         // to ensure we provide a consistent memory view of
@@ -241,7 +317,7 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
         // is not set, hence the compiler has to assume the assembly
         // will issue arbitrary memory accesses (acting as a compiler
         // fence).
-        asm!("
+        kernel::easm!("
           // Before switching to the app we need to save the kernel registers to
           // the kernel stack. We then save the stack pointer in the mscratch
           // CSR (0x340) so we can retrieve it after returning to the kernel
@@ -252,77 +328,19 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
           // memory map to make it easier to keep track:
           //
           // ```
-          // 34*4(sp):          <- original stack pointer
-          // 33*4(sp):
-          // 32*4(sp): x31
-          // 31*4(sp): x30
-          // 30*4(sp): x29
-          // 29*4(sp): x28
-          // 28*4(sp): x27
-          // 27*4(sp): x26
-          // 26*4(sp): x25
-          // 25*4(sp): x24
-          // 24*4(sp): x23
-          // 23*4(sp): x22
-          // 22*4(sp): x21
-          // 21*4(sp): x20
-          // 20*4(sp): x19
-          // 19*4(sp): x18
-          // 18*4(sp): x17
-          // 17*4(sp): x16
-          // 16*4(sp): x15
-          // 15*4(sp): x14
-          // 14*4(sp): x13
-          // 13*4(sp): x12
-          // 12*4(sp): x11
-          // 11*4(sp): x10
-          // 10*4(sp): x9
-          //  9*4(sp): x8
-          //  8*4(sp): x7
-          //  7*4(sp): x6
-          //  6*4(sp): x5
-          //  5*4(sp): x4
-          //  4*4(sp): x3
-          //  3*4(sp): x1
-          //  2*4(sp): _return_to_kernel (100) (address to resume after trap)
-          //  1*4(sp): *state   (Per-process StoredState struct)
-          //  0*4(sp): app s0   <- new stack pointer
+          // 34 * SZ(sp):          <- original stack pointer
+          // 3..32 * SZ(sp) : saved registers
+          // 2 * SZ(sp): _return_to_kernel (100) (address to resume after trap)
+          // 1 * SZ(sp): *state   (Per-process StoredState struct)
+          // 0 * SZ(sp): app s0   <- new stack pointer
           // ```
 
-          addi sp, sp, -34*4  // Move the stack pointer down to make room.
-
-          sw   x1,  3*4(sp)    // Save all of the registers on the kernel stack.
-          sw   x3,  4*4(sp)
-          sw   x4,  5*4(sp)
-          sw   x5,  6*4(sp)
-          sw   x6,  7*4(sp)
-          sw   x7,  8*4(sp)
-          sw   x8,  9*4(sp)
-          sw   x9,  10*4(sp)
-          sw   x10, 11*4(sp)
-          sw   x11, 12*4(sp)
-          sw   x12, 13*4(sp)
-          sw   x13, 14*4(sp)
-          sw   x14, 15*4(sp)
-          sw   x15, 16*4(sp)
-          sw   x16, 17*4(sp)
-          sw   x17, 18*4(sp)
-          sw   x18, 19*4(sp)
-          sw   x19, 20*4(sp)
-          sw   x20, 21*4(sp)
-          sw   x21, 22*4(sp)
-          sw   x22, 23*4(sp)
-          sw   x23, 24*4(sp)
-          sw   x24, 25*4(sp)
-          sw   x25, 26*4(sp)
-          sw   x26, 27*4(sp)
-          sw   x27, 28*4(sp)
-          sw   x28, 29*4(sp)
-          sw   x29, 30*4(sp)
-          sw   x30, 31*4(sp)
-          sw   x31, 32*4(sp)
-
-          sw   a0, 1*4(sp)    // Store process state pointer on stack as well.
+          addi sp, sp, -34*{CLEN_BYTES}  // Move the stack pointer down to make room.",
+          ;stptr!() ptrregn!("1") ", 3*{CLEN_BYTES}(sp)    // Save all of the registers on the kernel stack.",
+          FOR_RANGE("regn" in 3 .. 32 :
+                stptr!() ptrregn!() "\\()\\regn, (\\regn+1)*{CLEN_BYTES}(sp)"
+          ),
+          ; stx!() " a0, 1*{CLEN_BYTES}(sp)    // Store process state pointer on stack as well.
                               // We need to have this available for after the app
                               // returns to the kernel so we can store its
                               // registers.
@@ -352,15 +370,16 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
 
           // Store the address to jump back to on the stack so that the trap
           // handler knows where to return to after the app stops executing.
-          //
-          // In asm!() we can't use the shorthand `li` pseudo-instruction, as it
-          // complains about _return_to_kernel (100) not being a constant in the
-          // required range.
-          lui  t0, %hi(100f)
-          addi t0, t0, %lo(100f)
-          sw   t0, 2*4(sp)
 
-          csrw 0x340, sp      // Save stack pointer in mscratch. This allows
+          la   t0, 100f",
+          ; ".if " is_cheri!() "
+              // On CHERI, we must add some bounds information
+              cspecialr ct1, pcc
+              csetaddr  ct0, ct1, t0
+          .endif
+          " stptr!() ptrreg!("t0") ", 2*{CLEN_BYTES}(sp)",
+          csr_op!("mscratch" <- "sp"),
+          "                   // Save stack pointer in mscratch. This allows
                               // us to find it when the app returns back to
                               // the kernel.
 
@@ -368,46 +387,37 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
           // executing at. This has been saved in Riscv32iStoredState for us
           // (either when the app returned back to the kernel or in the
           // `set_process_function()` function).
-          lw   t0, 31*4(a0)   // Retrieve the PC from Riscv32iStoredState
-          csrw 0x341, t0      // Set mepc CSR. This is the PC we want to go to.
+          // Retrieve the PC from Riscv32iStoredState",
+          ; ldptr!() ptrreg!("t0") ", 31*{CLEN_BYTES}(a0)",
+          csr_op!("mepc" <- "t0"), "// Set mepc CSR. This is the PC we want to go to.
 
           // Restore all of the app registers from what we saved. If this is the
           // first time running the app then most of these values are
           // irrelevant, However we do need to set the four arguments to the
           // `_start_ function in the app. If the app has been executing then this
           // allows the app to correctly resume.
-          mv   t0,  a0       // Save the state pointer to a specific register.
-          lw   x1,  0*4(t0)  // ra
-          lw   x2,  1*4(t0)  // sp
-          lw   x3,  2*4(t0)  // gp
-          lw   x4,  3*4(t0)  // tp
-          lw   x6,  5*4(t0)  // t1
-          lw   x7,  6*4(t0)  // t2
-          lw   x8,  7*4(t0)  // s0,fp
-          lw   x9,  8*4(t0)  // s1
-          lw   x10, 9*4(t0)  // a0
-          lw   x11, 10*4(t0) // a1
-          lw   x12, 11*4(t0) // a2
-          lw   x13, 12*4(t0) // a3
-          lw   x14, 13*4(t0) // a4
-          lw   x15, 14*4(t0) // a5
-          lw   x16, 15*4(t0) // a6
-          lw   x17, 16*4(t0) // a7
-          lw   x18, 17*4(t0) // s2
-          lw   x19, 18*4(t0) // s3
-          lw   x20, 19*4(t0) // s4
-          lw   x21, 20*4(t0) // s5
-          lw   x22, 21*4(t0) // s6
-          lw   x23, 22*4(t0) // s7
-          lw   x24, 23*4(t0) // s8
-          lw   x25, 24*4(t0) // s9
-          lw   x26, 25*4(t0) // s10
-          lw   x27, 26*4(t0) // s11
-          lw   x28, 27*4(t0) // t3
-          lw   x29, 28*4(t0) // t4
-          lw   x30, 29*4(t0) // t5
-          lw   x31, 30*4(t0) // t6
-          lw   x5,  4*4(t0)  // t0. Do last since we overwrite our pointer.
+          mv   t0,  a0       // Save the state pointer to a specific register.",
+          FOR_RANGE("regn" in 1 .. 32 :
+                ".if \\regn != 5
+                    " ldptr!() ptrregn!() "\\()\\regn, (\\regn-1)*{CLEN_BYTES}(t0)
+                 .endif"
+          ),
+          ; ".if " is_cheri!() "
+              // Load processes DDC. We cannot restore it before the last load has happened.
+              // We can use mtdc as a scratch register (have it hold ct1), so ct1 can hold ddc.
+              // DDC should currently hold the kernel DDC, which should eventually go in mtdc
+              cspecialw   mtdc, ct1
+              " ldptr!() ptrreg!("t1") ", 32*{CLEN_BYTES}(t0)
+          .endif
+          " ldptr!() ptrregn!(5) ", 4*{CLEN_BYTES}(t0) // t0. Do last since we overwrite our pointer.
+          .if " is_cheri!() "
+              // Currently:
+              //    mtdc holds ct1
+              //    ct1 holds ddc
+              //    ddc holds mdtc
+              cspecialrw ct1, ddc, ct1
+              cspecialrw ct1, mtdc, ct1
+          .endif
 
           // Call mret to jump to where mepc points, switch to user mode, and
           // start running the app.
@@ -421,46 +431,20 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
         100: // _return_to_kernel
 
           // We have already stored the app registers in the trap handler. We
-          // can restore the kernel registers before resuming kernel code.
-          lw   x1,  3*4(sp)
-          lw   x3,  4*4(sp)
-          lw   x4,  5*4(sp)
-          lw   x5,  6*4(sp)
-          lw   x6,  7*4(sp)
-          lw   x7,  8*4(sp)
-          lw   x8,  9*4(sp)
-          lw   x9,  10*4(sp)
-          lw   x10, 11*4(sp)
-          lw   x11, 12*4(sp)
-          lw   x12, 13*4(sp)
-          lw   x13, 14*4(sp)
-          lw   x14, 15*4(sp)
-          lw   x15, 16*4(sp)
-          lw   x16, 17*4(sp)
-          lw   x17, 18*4(sp)
-          lw   x18, 19*4(sp)
-          lw   x19, 20*4(sp)
-          lw   x20, 21*4(sp)
-          lw   x21, 22*4(sp)
-          lw   x22, 23*4(sp)
-          lw   x23, 24*4(sp)
-          lw   x24, 25*4(sp)
-          lw   x25, 26*4(sp)
-          lw   x26, 27*4(sp)
-          lw   x27, 28*4(sp)
-          lw   x28, 29*4(sp)
-          lw   x29, 30*4(sp)
-          lw   x30, 31*4(sp)
-          lw   x31, 32*4(sp)
+          // can restore the kernel registers before resuming kernel code.",
+          ; ldptr!() ptrregn!(1) ", 3*{CLEN_BYTES}(sp)",
+          FOR_RANGE("regn" in 3 .. 32 :
+              ldptr!() ptrregn!() "\\()\\regn, (\\regn+1)*{CLEN_BYTES}(sp)"
+          ),
 
-          addi sp, sp, 34*4   // Reset kernel stack pointer
-          ",
+          "addi sp, sp, 34*{CLEN_BYTES}   // Reset kernel stack pointer",
 
           // The register to put the state struct pointer in is not
           // particularly relevant, however we must avoid using t0
           // as that is overwritten prior to being accessed
           // (although stored and later restored) in the assembly
-          in("a0") state as *mut Riscv32iStoredState,
+          CLEN_BYTES = const size_of::<cptr>(),
+          in("a0") state as *mut RiscvStoredState,
         );
 
         let ret = match mcause::Trap::from(state.mcause as usize) {
@@ -478,11 +462,11 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
                         state.pc += 4;
 
                         let syscall = kernel::syscall::Syscall::from_register_arguments(
-                            state.regs[R_A4] as u8,
-                            state.regs[R_A0] as usize,
-                            state.regs[R_A1] as usize,
-                            state.regs[R_A2] as usize,
-                            state.regs[R_A3] as usize,
+                            usize::from(state.regs[R_A4]) as u8,
+                            usize::from(state.regs[R_A0]),
+                            state.regs[R_A1],
+                            state.regs[R_A2],
+                            state.regs[R_A3],
                         );
 
                         match syscall {
@@ -498,14 +482,14 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
             }
         };
         let new_stack_pointer = state.regs[R_SP];
-        (ret, Some(new_stack_pointer as *const u8))
+        (ret, Some(new_stack_pointer.as_ptr() as *const u8))
     }
 
     unsafe fn print_context(
         &self,
         _accessible_memory_start: *const u8,
         _app_brk: *const u8,
-        state: &Riscv32iStoredState,
+        state: &RiscvStoredState,
         writer: &mut dyn Write,
     ) {
         let _ = writer.write_fmt(format_args!(
@@ -526,10 +510,10 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
              \r\n R13: {:#010X}    R29: {:#010X}\
              \r\n R14: {:#010X}    R30: {:#010X}\
              \r\n R15: {:#010X}    R31: {:#010X}\
-             \r\n PC : {:#010X}\
+             \r\n PC : {:#010X}    {}           \
              \r\n\
              \r\n mcause: {:#010X} (",
-            0,
+            <cptr as From<usize>>::from(0usize),
             state.regs[15],
             state.regs[0],
             state.regs[16],
@@ -562,35 +546,34 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
             state.regs[14],
             state.regs[30],
             state.pc,
+            state.get_ddc_display(),
             state.mcause,
         ));
-        crate::print_mcause(mcause::Trap::from(state.mcause as usize), writer);
+        let cause = mcause::Trap::from(state.mcause as usize);
+        crate::print_mcause(cause, writer);
         let _ = writer.write_fmt(format_args!(
             ")\
-             \r\n mtval:  {:#010X}\
-             \r\n\r\n",
+             \r\n mtval:  {:#010X} (",
             state.mtval,
         ));
+        crate::print_mtval(cause, state.mtval, writer);
+        let _ = writer.write_fmt(format_args!(")\r\n\r\n",));
     }
 
-    fn store_context(
-        &self,
-        state: &Riscv32iStoredState,
-        out: &mut [u8],
-    ) -> Result<usize, ErrorCode> {
-        const U32_SZ: usize = size_of::<usize>();
-        if out.len() >= size_of::<Riscv32iStoredState>() + METADATA_LEN * U32_SZ {
-            write_u32_to_u8_slice(VERSION, out, VERSION_IDX);
-            write_u32_to_u8_slice(STORED_STATE_SIZE, out, SIZE_IDX);
-            write_u32_to_u8_slice(u32::from_le_bytes(TAG), out, TAG_IDX);
-            write_u32_to_u8_slice(state.pc, out, PC_IDX);
-            write_u32_to_u8_slice(state.mcause, out, MCAUSE_IDX);
-            write_u32_to_u8_slice(state.mtval, out, MTVAL_IDX);
+    fn store_context(&self, state: &RiscvStoredState, out: &mut [u8]) -> Result<usize, ErrorCode> {
+        const USIZE_SZ: usize = size_of::<usize>();
+        if out.len() >= size_of::<RiscvStoredState>() + METADATA_LEN * USIZE_SZ {
+            write_usize_to_u8_slice(VERSION, out, VERSION_IDX);
+            write_usize_to_u8_slice(STORED_STATE_SIZE, out, SIZE_IDX);
+            write_usize_to_u8_slice(usize::from_le_bytes(TAG), out, TAG_IDX);
+            write_usize_to_u8_slice(usize::from(state.pc), out, PC_IDX);
+            write_usize_to_u8_slice(state.mcause, out, MCAUSE_IDX);
+            write_usize_to_u8_slice(state.mtval, out, MTVAL_IDX);
             for (i, v) in state.regs.iter().enumerate() {
-                write_u32_to_u8_slice(*v, out, REGS_IDX + i);
+                write_usize_to_u8_slice(usize::from(*v), out, REGS_IDX + i);
             }
             // +3 for pc, mcause, mtval
-            Ok((state.regs.len() + 3 + METADATA_LEN) * U32_SZ)
+            Ok((state.regs.len() + 3 + METADATA_LEN) * USIZE_SZ)
         } else {
             Err(ErrorCode::SIZE)
         }

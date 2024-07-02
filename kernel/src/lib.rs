@@ -85,20 +85,46 @@
 //!    this use case. It is likely we will have to create new interfaces as new
 //!    use cases are discovered.
 
+#![feature(macro_metavar_expr)]
+#![feature(const_precise_live_drops)]
+#![feature(const_trait_impl)]
+#![feature(const_mut_refs)]
+#![feature(const_slice_split_at_mut)]
 #![feature(core_intrinsics)]
+#![feature(slice_ptr_get)]
+#![feature(slice_ptr_len)]
+#![feature(nonnull_slice_from_raw_parts)]
+#![feature(const_nonnull_slice_from_raw_parts)]
+#![feature(const_refs_to_cell)]
+#![feature(const_maybe_uninit_zeroed)]
 #![warn(unreachable_pub)]
+#![feature(const_type_id)]
+#![feature(as_array_of_cells)]
+#![feature(maybe_uninit_slice)]
+#![feature(layout_for_ptr)]
+#![feature(const_convert)]
+// Sometimes utility functions go into / out of use. This warning is annoying.
+#![allow(dead_code)]
 #![no_std]
+
+// This is used to run the tests on a host
+#[cfg(test)]
+#[macro_use]
+extern crate std;
 
 // Define the kernel major and minor versions.
 pub const KERNEL_MAJOR_VERSION: u16 = 2;
 pub const KERNEL_MINOR_VERSION: u16 = 1;
 
 pub mod capabilities;
+pub mod cheri;
 pub mod collections;
 pub mod component;
+pub mod config;
 pub mod debug;
 pub mod deferred_call;
 pub mod dynamic_deferred_call;
+pub mod easm;
 pub mod errorcode;
 pub mod grant;
 pub mod hil;
@@ -113,7 +139,6 @@ pub mod syscall;
 pub mod upcall;
 pub mod utilities;
 
-mod config;
 mod kernel;
 mod memop;
 mod process_policies;
@@ -124,6 +149,8 @@ mod syscall_driver;
 
 // Core resources exposed as `kernel::Type`.
 pub use crate::errorcode::ErrorCode;
-pub use crate::kernel::Kernel;
+pub use crate::kernel::{GrantCounter, Kernel, ProtoKernel};
 pub use crate::process::ProcessId;
 pub use crate::scheduler::Scheduler;
+// These types need to be leaked for use by schedulers and board specific type
+pub use crate::kernel::{ProcEntry, ProcessArray};

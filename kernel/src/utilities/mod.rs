@@ -4,9 +4,11 @@ pub mod binary_write;
 pub mod copy_slice;
 pub mod helpers;
 pub mod leasable_buffer;
+pub mod leased_buffer;
 pub mod math;
 pub mod mut_imut_buffer;
 pub mod peripheral_management;
+pub mod singleton_checker;
 pub mod static_init;
 pub mod storage_volume;
 
@@ -30,7 +32,7 @@ pub mod registers {
 ///
 ///     use kernel::utilities::cells::TakeCell;
 pub mod cells {
-    pub use tock_cells::map_cell::MapCell;
+    pub use tock_cells::map_cell::*;
     pub use tock_cells::numeric_cell_ext::NumericCellExt;
     pub use tock_cells::optional_cell::OptionalCell;
     pub use tock_cells::take_cell::TakeCell;

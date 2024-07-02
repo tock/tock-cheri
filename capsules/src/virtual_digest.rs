@@ -43,7 +43,7 @@ pub struct VirtualMuxDigest<'a, A: digest::Digest<'a, L>, const L: usize> {
 impl<'a, A: digest::Digest<'a, L>, const L: usize> ListNode<'a, VirtualMuxDigest<'a, A, L>>
     for VirtualMuxDigest<'a, A, L>
 {
-    fn next(&self) -> &'a ListLink<VirtualMuxDigest<'a, A, L>> {
+    fn next(&self) -> &ListLink<'a, VirtualMuxDigest<'a, A, L>> {
         &self.next
     }
 }

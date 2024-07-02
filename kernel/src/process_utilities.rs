@@ -5,12 +5,12 @@ use core::fmt;
 
 use crate::capabilities::ProcessManagementCapability;
 use crate::config;
-use crate::debug;
 use crate::kernel::Kernel;
 use crate::platform::chip::Chip;
-use crate::process::Process;
+use crate::platform::mpu::MPU;
 use crate::process_policies::ProcessFaultPolicy;
 use crate::process_standard::ProcessStandard;
+use crate::{debug, ErrorCode};
 
 /// Errors that can occur when trying to load and create processes.
 pub enum ProcessLoadError {
@@ -62,6 +62,21 @@ pub enum ProcessLoadError {
     /// Process loading error due (likely) to a bug in the kernel. If you get
     /// this error please open a bug report.
     InternalError,
+}
+
+impl From<ProcessLoadError> for ErrorCode {
+    fn from(er: ProcessLoadError) -> Self {
+        match er {
+            ProcessLoadError::NotEnoughMemory => ErrorCode::NOMEM,
+            ProcessLoadError::IncorrectFlashAddress { .. }
+            | ProcessLoadError::MemoryAddressMismatch { .. }
+            | ProcessLoadError::MpuInvalidFlashLength
+            | ProcessLoadError::NotEnoughFlash
+            | ProcessLoadError::TbfHeaderParseFailure(_) => ErrorCode::INVAL,
+            ProcessLoadError::IncompatibleKernelVersion { .. } => ErrorCode::NOSUPPORT,
+            ProcessLoadError::InternalError => ErrorCode::FAIL,
+        }
+    }
 }
 
 impl From<tock_tbf::types::TbfParseError> for ProcessLoadError {
@@ -148,7 +163,7 @@ impl fmt::Debug for ProcessLoadError {
 /// processes from slices of flash an memory is fundamentally unsafe. Therefore,
 /// we require the `ProcessManagementCapability` to call this function.
 ///
-/// Returns `Ok(())` if process discovery went as expected. Returns a
+/// Returns `Ok()` if process discovery went as expected. Returns any remaining app_memory.
 /// `ProcessLoadError` if something goes wrong during TBF parsing or process
 /// creation.
 #[inline(always)]
@@ -156,12 +171,12 @@ pub fn load_processes_advanced<C: Chip>(
     kernel: &'static Kernel,
     chip: &'static C,
     app_flash: &'static [u8],
-    app_memory: &mut [u8], // not static, so that process.rs cannot hold on to slice w/o unsafe
-    procs: &'static mut [Option<&'static dyn Process>],
+    // must be static so caller cannot retain this
+    app_memory: &'static mut [u8],
     fault_policy: &'static dyn ProcessFaultPolicy,
     require_kernel_version: bool,
     _capability: &dyn ProcessManagementCapability,
-) -> Result<(), ProcessLoadError> {
+) -> Result<Option<&'static mut [u8]>, (ProcessLoadError, Option<&'static mut [u8]>)> {
     if config::CONFIG.debug_load_processes {
         debug!(
             "Loading processes from flash={:#010X}-{:#010X} into sram={:#010X}-{:#010X}",
@@ -173,88 +188,127 @@ pub fn load_processes_advanced<C: Chip>(
     }
 
     let mut remaining_flash = app_flash;
-    let mut remaining_memory = app_memory;
+    let mut remaining_memory = Some(app_memory);
 
-    // Try to discover up to `procs.len()` processes in flash.
-    let mut index = 0;
-    while index < procs.len() {
-        // Get the first eight bytes of flash to check if there is another
-        // app.
-        let test_header_slice = match remaining_flash.get(0..8) {
-            Some(s) => s,
-            None => {
-                // Not enough flash to test for another app. This just means
-                // we are at the end of flash, and there are no more apps to
-                // load.
-                return Ok(());
-            }
+    // Keep trying to load processes until there are no more.
+    // We intentionally keep loading even if the process array is full so that we don't silently
+    // forget to load processes.
+    loop {
+        let flash_before = remaining_flash;
+        let loaded_any = try_load_process(
+            kernel,
+            chip,
+            fault_policy,
+            require_kernel_version,
+            &mut remaining_flash,
+            &mut remaining_memory,
+            true,
+            _capability,
+        )
+        .map_err(|er| (er, remaining_memory.take()))?;
+
+        // Nothing more to load
+        if !loaded_any && flash_before.as_ptr() == remaining_flash.as_ptr() {
+            return Ok(remaining_memory.take());
+        }
+    }
+}
+
+/// Tries to load a single tbf located at remaining_flash into memory at remaining_memory.
+/// Returns OK(true) if a process was loaded
+/// Returns OK(false) if a process was not loaded but no fatal error was encountered
+fn try_load_process<'a, 'b, C: Chip>(
+    kernel: &'static Kernel,
+    chip: &'static C,
+    fault_policy: &'static dyn ProcessFaultPolicy,
+    require_kernel_version: bool,
+    remaining_flash_in: &mut &'b [u8],
+    // NOT static so that process.rs cannot keep a reference (if ever its interface changes)
+    // This cannot be public because remaining_memory needs to be static to the caller.
+    remaining_memory: &mut Option<&'a mut [u8]>,
+    flash_is_static: bool,
+    _capability: &dyn ProcessManagementCapability,
+) -> Result<bool, ProcessLoadError> {
+    let remaining_flash = *remaining_flash_in;
+    // Get the first eight bytes of flash to check if there is another
+    // app.
+    let test_header_slice = match remaining_flash.get(0..8) {
+        Some(s) => s,
+        None => {
+            // Not enough flash to test for another app. This just means
+            // we are at the end of flash, and there are no more apps to
+            // load.
+            return Ok(false);
+        }
+    };
+
+    // Pass the first eight bytes to tbfheader to parse out the length of
+    // the tbf header and app. We then use those values to see if we have
+    // enough flash remaining to parse the remainder of the header.
+    let (version, header_length, entry_length) = match tock_tbf::parse::parse_tbf_header_lengths(
+        test_header_slice
+            .try_into()
+            .or(Err(ProcessLoadError::InternalError))?,
+    ) {
+        Ok((v, hl, el)) => (v, hl, el),
+        Err(tock_tbf::types::InitialTbfParseError::InvalidHeader(entry_length)) => {
+            // If we could not parse the header, then we want to skip over
+            // this app and look for the next one.
+            (0, 0, entry_length)
+        }
+        Err(tock_tbf::types::InitialTbfParseError::UnableToParse) => {
+            // Since Tock apps use a linked list, it is very possible the
+            // header we started to parse is intentionally invalid to signal
+            // the end of apps. This is ok and just means we have finished
+            // loading apps.
+            return Ok(false);
+        }
+    };
+
+    // Now we can get a slice which only encompasses the length of flash
+    // described by this tbf header.  We will either parse this as an actual
+    // app, or skip over this region.
+    let entry_flash = remaining_flash
+        .get(0..entry_length as usize)
+        .ok_or(ProcessLoadError::NotEnoughFlash)?;
+
+    // Advance the flash slice for process discovery beyond this last entry.
+    // This will be the start of where we look for a new process since Tock
+    // processes are allocated back-to-back in flash.
+    *remaining_flash_in = remaining_flash
+        .get(entry_flash.len()..)
+        .ok_or(ProcessLoadError::NotEnoughFlash)?;
+
+    if header_length > 0 {
+        let index = kernel.get_next_free_proc_entry()?;
+        // If we found an actual app header, try to create a `Process`
+        // object. We also need to shrink the amount of remaining memory
+        // based on whatever is assigned to the new process if one is
+        // created.
+
+        // Try to create a process object from that app slice. If we don't
+        // get a process and we didn't get a loading error (aka we got to
+        // this point), then the app is a disabled process or just padding.
+        let process_option = unsafe {
+            ProcessStandard::create(
+                kernel,
+                chip,
+                entry_flash,
+                header_length as usize,
+                version,
+                remaining_memory,
+                fault_policy,
+                require_kernel_version,
+                index,
+                flash_is_static,
+            )?
         };
-
-        // Pass the first eight bytes to tbfheader to parse out the length of
-        // the tbf header and app. We then use those values to see if we have
-        // enough flash remaining to parse the remainder of the header.
-        let (version, header_length, entry_length) = match tock_tbf::parse::parse_tbf_header_lengths(
-            test_header_slice
-                .try_into()
-                .or(Err(ProcessLoadError::InternalError))?,
-        ) {
-            Ok((v, hl, el)) => (v, hl, el),
-            Err(tock_tbf::types::InitialTbfParseError::InvalidHeader(entry_length)) => {
-                // If we could not parse the header, then we want to skip over
-                // this app and look for the next one.
-                (0, 0, entry_length)
-            }
-            Err(tock_tbf::types::InitialTbfParseError::UnableToParse) => {
-                // Since Tock apps use a linked list, it is very possible the
-                // header we started to parse is intentionally invalid to signal
-                // the end of apps. This is ok and just means we have finished
-                // loading apps.
-                return Ok(());
-            }
-        };
-
-        // Now we can get a slice which only encompasses the length of flash
-        // described by this tbf header.  We will either parse this as an actual
-        // app, or skip over this region.
-        let entry_flash = remaining_flash
-            .get(0..entry_length as usize)
-            .ok_or(ProcessLoadError::NotEnoughFlash)?;
-
-        // Advance the flash slice for process discovery beyond this last entry.
-        // This will be the start of where we look for a new process since Tock
-        // processes are allocated back-to-back in flash.
-        remaining_flash = remaining_flash
-            .get(entry_flash.len()..)
-            .ok_or(ProcessLoadError::NotEnoughFlash)?;
-
         // Need to reassign remaining_memory in every iteration so the compiler
         // knows it will not be re-borrowed.
-        remaining_memory = if header_length > 0 {
-            // If we found an actual app header, try to create a `Process`
-            // object. We also need to shrink the amount of remaining memory
-            // based on whatever is assigned to the new process if one is
-            // created.
-
-            // Try to create a process object from that app slice. If we don't
-            // get a process and we didn't get a loading error (aka we got to
-            // this point), then the app is a disabled process or just padding.
-            let (process_option, unused_memory) = unsafe {
-                ProcessStandard::create(
-                    kernel,
-                    chip,
-                    entry_flash,
-                    header_length as usize,
-                    version,
-                    remaining_memory,
-                    fault_policy,
-                    require_kernel_version,
-                    index,
-                )?
-            };
-            process_option.map(|process| {
-                if config::CONFIG.debug_load_processes {
-                    let addresses = process.get_addresses();
-                    debug!(
+        process_option.map(|process| {
+            if config::CONFIG.debug_load_processes {
+                let addresses = process.get_addresses();
+                debug!(
                         "Loaded process[{}] from flash={:#010X}-{:#010X} into sram={:#010X}-{:#010X} = {:?}",
                         index,
                         entry_flash.as_ptr() as usize,
@@ -263,24 +317,40 @@ pub fn load_processes_advanced<C: Chip>(
                         addresses.sram_end - 1,
                         process.get_process_name()
                     );
-                }
+            }
 
-                // Save the reference to this process in the processes array.
-                procs[index] = Some(process);
-                // Can now increment index to use the next spot in the processes
-                // array. Padding apps mean we might detect valid headers but
-                // not actually insert a new process in the array.
-                index += 1;
-            });
-            unused_memory
-        } else {
-            // We are just skipping over this region of flash, so we have the
-            // same amount of process memory to allocate from.
-            remaining_memory
-        };
+            let _ = kernel.set_next_proc_entry_used(process);
+
+            chip.mpu().new_process(process.processid());
+        });
+        return Ok(true);
     }
 
-    Ok(())
+    // We are just skipping over this region of flash, so we have the
+    // same amount of process memory to allocate from.
+    Ok(false)
+}
+
+/// Public version of try_load_process that ensures remaining_memory is static.
+pub fn try_load_process_pub<'b, C: Chip>(
+    kernel: &'static Kernel,
+    chip: &'static C,
+    fault_policy: &'static dyn ProcessFaultPolicy,
+    require_kernel_version: bool,
+    flash: &mut &'b [u8],
+    remaining_memory: &mut Option<&'static mut [u8]>,
+    _capability: &dyn ProcessManagementCapability,
+) -> Result<bool, ProcessLoadError> {
+    try_load_process(
+        kernel,
+        chip,
+        fault_policy,
+        require_kernel_version,
+        flash,
+        remaining_memory,
+        false,
+        _capability,
+    )
 }
 
 /// This is a wrapper function for `load_processes_advanced` that uses
@@ -293,19 +363,57 @@ pub fn load_processes<C: Chip>(
     kernel: &'static Kernel,
     chip: &'static C,
     app_flash: &'static [u8],
-    app_memory: &mut [u8], // not static, so that process.rs cannot hold on to slice w/o unsafe
-    procs: &'static mut [Option<&'static dyn Process>],
+    // this must be static because the caller should not be able to simply borrow the buffer and then
+    // use it again afterwards. App memory will eventually come back to the kernel via the allow
+    // mechanism.
+    app_memory: &'static mut [u8],
     fault_policy: &'static dyn ProcessFaultPolicy,
     capability: &dyn ProcessManagementCapability,
 ) -> Result<(), ProcessLoadError> {
-    load_processes_advanced(
+    match load_processes_advanced(
         kernel,
         chip,
         app_flash,
         app_memory,
-        procs,
         fault_policy,
         true,
         capability,
-    )
+    ) {
+        Ok(_) => Ok(()),
+        Err((er, _)) => Err(er),
+    }
+}
+
+/// Return (flash, ram)
+/// Must call this only once as the ram is mut.
+pub unsafe fn get_mems() -> (&'static [u8], &'static mut [u8]) {
+    #[cfg(target_os = "none")]
+    {
+        // These symbols are defined in the linker script.
+        extern "C" {
+            /// Beginning of the ROM region containing app images.
+            static _sapps: u8;
+            /// End of the ROM region containing app images.
+            static _eapps: u8;
+            /// Beginning of the RAM region for app memory.
+            static mut _sappmem: u8;
+            /// End of the RAM region for app memory.
+            static _eappmem: u8;
+        }
+        (
+            core::slice::from_raw_parts(
+                &_sapps as *const u8,
+                &_eapps as *const u8 as usize - &_sapps as *const u8 as usize,
+            ),
+            core::slice::from_raw_parts_mut(
+                &mut _sappmem as *mut u8,
+                &_eappmem as *const u8 as usize - &_sappmem as *const u8 as usize,
+            ),
+        )
+    }
+
+    #[cfg(not(target_os = "none"))]
+    {
+        (&[], &mut [])
+    }
 }

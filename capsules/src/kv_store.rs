@@ -96,7 +96,7 @@ pub struct KVStore<'a, K: KVSystem<'a> + KVSystem<'a, K = T>, T: 'static + kv_sy
 impl<'a, K: KVSystem<'a, K = T>, T: kv_system::KeyType> ListNode<'a, KVStore<'a, K, T>>
     for KVStore<'a, K, T>
 {
-    fn next(&self) -> &'a ListLink<KVStore<'a, K, T>> {
+    fn next(&self) -> &ListLink<'a, KVStore<'a, K, T>> {
         &self.next
     }
 }

@@ -252,7 +252,7 @@ pub struct UDPSendStruct<'a, T: IP6Sender<'a>> {
 }
 
 impl<'a, T: IP6Sender<'a>> ListNode<'a, UDPSendStruct<'a, T>> for UDPSendStruct<'a, T> {
-    fn next(&'a self) -> &'a ListLink<'a, UDPSendStruct<'a, T>> {
+    fn next(&self) -> &ListLink<'a, UDPSendStruct<'a, T>> {
         &self.next
     }
 }

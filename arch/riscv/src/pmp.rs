@@ -10,15 +10,19 @@
 //! PMP regions.
 
 use core::cell::Cell;
-use core::cmp;
 use core::fmt;
+use core::{cmp, mem};
 use kernel::utilities::cells::OptionalCell;
 
 use crate::csr;
 use kernel::platform::mpu;
+use kernel::platform::mpu::RemoveRegionResult;
 use kernel::utilities::cells::MapCell;
 use kernel::utilities::registers::{self, register_bitfields};
-use kernel::ProcessId;
+use kernel::utilities::singleton_checker::SingletonChecker;
+use kernel::ErrorCode::INVAL;
+use kernel::{ErrorCode, ProcessId};
+use tock_registers::interfaces::Writeable;
 
 // Generic PMP config
 register_bitfields![u8,
@@ -35,6 +39,44 @@ register_bitfields![u8,
         l OFFSET(7) NUMBITS(1) []
     ]
 ];
+
+// This is to handle a QEMU bug. QEMU tries not to do a PMP check for every instruction,
+// but when a PMP check is performed, the access size is not known because QEMU
+// does not know how many instructions it will translate for one basic block.
+// Instead, it just checks if an entire page worth could be translated.
+// This requires us to over align to the size QEMU assumes is a page.
+#[cfg(feature = "page_align_pmp")]
+const PMP_ALIGN: usize = 0x1000;
+
+// I know PMP align is actually 4, but by making it 8 I can get rid of the whole "sizes less than
+// 8 need to be rounded up to 8, but sizes greater than 8 to the nearest 4" nonsense.
+
+#[cfg(not(feature = "page_align_pmp"))]
+const PMP_ALIGN: usize = 8;
+
+// Align down, return difference
+fn align_down_diff(an_addr: &mut usize) -> usize {
+    let diff = *an_addr % PMP_ALIGN;
+    *an_addr -= diff;
+    diff
+}
+
+fn align_up(an_addr: &mut usize) {
+    *an_addr = *an_addr + ((0usize - *an_addr) % PMP_ALIGN)
+}
+
+fn align_region(start: &mut usize, size: &mut usize) {
+    // Region start round up
+    *size += align_down_diff(start);
+
+    // Region size round up
+    align_up(size);
+
+    // Regions must be at least 8 bytes
+    if *size < 8 {
+        *size = if 8 > PMP_ALIGN { 8 } else { PMP_ALIGN };
+    }
+}
 
 /// Main PMP struct.
 ///
@@ -65,11 +107,66 @@ pub struct PMP<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> {
     /// This is the total number of available regions.
     /// This will be between 0 and MAX_AVAILABLE_REGIONS_OVER_TWO * 2 depending
     /// on the hardware and previous boot stages.
-    num_regions: usize,
+    num_regions: Cell<usize>,
+}
+
+fn set_pmp_region(region: &Option<PMPRegion>, with_index: usize) {
+    match region {
+        Some(r) => {
+            let cfg_val = r.cfg.value as usize;
+            let start = r.location.0 as usize;
+            let size = r.location.1;
+
+            let disable_val = (csr::pmpconfig::pmpcfg::r0::CLEAR
+                + csr::pmpconfig::pmpcfg::w0::CLEAR
+                + csr::pmpconfig::pmpcfg::x0::CLEAR
+                + csr::pmpconfig::pmpcfg::a0::OFF)
+                .value;
+            let index = csr::CSR::pmp_index_to_cfg_index(2 * with_index);
+            // Second region has sub_index + 1
+            let sub_index = csr::CSR::pmp_index_to_cfg_sub_index(2 * with_index);
+            let region_shift = sub_index * 8;
+            let other_region_mask: usize = !(0xFFFFusize << region_shift);
+
+            csr::CSR.pmpaddr_set(with_index * 2, (start) >> 2);
+            csr::CSR.pmpaddr_set((with_index * 2) + 1, (start + size) >> 2);
+
+            csr::CSR.pmpconfig_set(
+                index,
+                (disable_val | cfg_val << 8) << region_shift
+                    | (csr::CSR.pmpconfig_get(index) & other_region_mask),
+            );
+        }
+        None => {}
+    };
 }
 
 impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> PMP<MAX_AVAILABLE_REGIONS_OVER_TWO> {
+    pub const fn const_new(chk: &mut SingletonChecker) -> Self {
+        kernel::assert_single!(chk);
+        Self {
+            last_configured_for: MapCell::empty(),
+            num_regions: Cell::new(0),
+            locked_region_mask: Cell::new(0),
+        }
+    }
+
+    // Safety: singleton
     pub unsafe fn new() -> Self {
+        let pmp = Self {
+            last_configured_for: MapCell::empty(),
+            num_regions: Cell::new(0),
+            locked_region_mask: Cell::new(0),
+        };
+        pmp.init();
+        pmp
+    }
+
+    pub fn init(&self) {
+        // This scan will clear the PMP so cannot be run if we are configured
+        if self.last_configured_for.is_some() {
+            return;
+        }
         // RISC-V PMP can support from 0 to 64 PMP regions
         // Let's figure out how many are supported.
         // We count any regions that are locked as unsupported
@@ -77,15 +174,18 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> PMP<MAX_AVAILABLE_REGIONS_OVER
         let mut locked_region_mask = 0;
 
         for i in 0..(MAX_AVAILABLE_REGIONS_OVER_TWO * 2) {
+            let index = csr::CSR::pmp_index_to_cfg_index(i);
+            let shift = csr::CSR::pmp_index_to_cfg_sub_index(i) * 8;
+
             // Read the current value
-            let pmpcfg_og = csr::CSR.pmpconfig_get(i / 4);
+            let pmpcfg_og = csr::CSR.pmpconfig_get(index);
 
             // Flip R, W, X bits
-            let pmpcfg_new = pmpcfg_og ^ (3 << ((i % 4) * 8));
-            csr::CSR.pmpconfig_set(i / 4, pmpcfg_new);
+            let pmpcfg_new = pmpcfg_og ^ (3 << shift);
+            csr::CSR.pmpconfig_set(index, pmpcfg_new);
 
             // Check if the bits are set
-            let pmpcfg_check = csr::CSR.pmpconfig_get(i / 4);
+            let pmpcfg_check = csr::CSR.pmpconfig_get(index);
 
             // Check if the changes stuck
             if pmpcfg_check == pmpcfg_og {
@@ -93,7 +193,7 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> PMP<MAX_AVAILABLE_REGIONS_OVER
                 // out why
 
                 // Check if the locked bit is set
-                if pmpcfg_og & ((1 << 7) << ((i % 4) * 8)) > 0 {
+                if pmpcfg_og & ((1 << 7) << shift) > 0 {
                     // The bit is locked. Mark this regions as not usable
                     locked_region_mask |= 1 << i;
                 } else {
@@ -108,14 +208,11 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> PMP<MAX_AVAILABLE_REGIONS_OVER
             }
 
             // Reset back to how we found it
-            csr::CSR.pmpconfig_set(i / 4, pmpcfg_og);
+            csr::CSR.pmpconfig_set(index, pmpcfg_og);
         }
 
-        Self {
-            last_configured_for: MapCell::empty(),
-            num_regions,
-            locked_region_mask: Cell::new(locked_region_mask),
-        }
+        self.locked_region_mask.set(locked_region_mask);
+        self.num_regions.set(num_regions);
     }
 }
 
@@ -289,6 +386,7 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::MPU
     for PMP<MAX_AVAILABLE_REGIONS_OVER_TWO>
 {
     type MpuConfig = PMPConfig<MAX_AVAILABLE_REGIONS_OVER_TWO>;
+    const MIN_MPUALIGN: usize = PMP_ALIGN;
 
     fn clear_mpu(&self) {
         // We want to disable all of the hardware entries, so we use `NUM_REGIONS` here,
@@ -299,10 +397,10 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::MPU
         for x in 1..(MAX_AVAILABLE_REGIONS_OVER_TWO * 2) {
             csr::CSR.pmpaddr_set(x, 0x0);
         }
-        for x in 1..(MAX_AVAILABLE_REGIONS_OVER_TWO * 2 / 4) {
-            csr::CSR.pmpconfig_set(x, 0);
+        for x in 1..(MAX_AVAILABLE_REGIONS_OVER_TWO * 2 / mem::size_of::<usize>()) {
+            csr::CSR.pmpconfig_set(x * (mem::size_of::<usize>() / 4), 0);
         }
-        csr::CSR.pmpaddr_set(0, 0xFFFF_FFFF);
+        csr::CSR.pmpaddr_set(0, usize::MAX);
         // enable R W X fields
         csr::CSR.pmpconfig_set(
             0,
@@ -324,7 +422,7 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::MPU
     }
 
     fn number_total_regions(&self) -> usize {
-        self.num_regions / 2
+        self.num_regions.get() / 2
     }
 
     fn allocate_region(
@@ -352,20 +450,7 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::MPU
         let mut start = unallocated_memory_start as usize;
         let mut size = min_region_size;
 
-        // Region start always has to align to 4 bytes
-        if start % 4 != 0 {
-            start += 4 - (start % 4);
-        }
-
-        // Region size always has to align to 4 bytes
-        if size % 4 != 0 {
-            size += 4 - (size % 4);
-        }
-
-        // Regions must be at least 8 bytes
-        if size < 8 {
-            size = 8;
-        }
+        align_region(&mut start, &mut size);
 
         let region = PMPRegion::new(start as *const u8, size, permissions);
 
@@ -379,22 +464,22 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::MPU
         &self,
         region: mpu::Region,
         config: &mut Self::MpuConfig,
-    ) -> Result<(), ()> {
+    ) -> Result<RemoveRegionResult, ErrorCode> {
         let (index, _r) = config
             .regions
             .iter()
             .enumerate()
             .find(|(_idx, r)| r.map_or(false, |r| r == region))
-            .ok_or(())?;
+            .ok_or(INVAL)?;
 
         if config.is_index_locked_or_app(self.locked_region_mask.get(), index) {
-            return Err(());
+            return Err(INVAL);
         }
 
         config.regions[index] = None;
         config.is_dirty.set(true);
 
-        Ok(())
+        Ok(RemoveRegionResult::Sync)
     }
 
     fn allocate_app_memory_region(
@@ -428,9 +513,8 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::MPU
         // App memory size is what we actual set the region to. So this region
         // has to be aligned to 4 bytes.
         let mut initial_app_memory_size: usize = initial_app_memory_size;
-        if initial_app_memory_size % 4 != 0 {
-            initial_app_memory_size += 4 - (initial_app_memory_size % 4);
-        }
+
+        align_up(&mut initial_app_memory_size);
 
         // Make sure there is enough memory for app memory and kernel memory.
         let mut region_size = cmp::max(
@@ -438,13 +522,10 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::MPU
             initial_app_memory_size + initial_kernel_memory_size,
         ) as usize;
 
-        // Region size always has to align to 4 bytes
-        if region_size % 4 != 0 {
-            region_size += 4 - (region_size % 4);
-        }
-
         // The region should start as close as possible to the start of the unallocated memory.
-        let region_start = unallocated_memory_start as usize;
+        let mut region_start = unallocated_memory_start as usize;
+
+        align_region(&mut region_start, &mut region_size);
 
         // Make sure the region fits in the unallocated memory.
         if region_start + region_size
@@ -487,13 +568,19 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::MPU
         let app_memory_break = app_memory_break as usize;
         let kernel_memory_break = kernel_memory_break as usize;
 
+        let mut region_start = region_start as usize;
+        let mut region_size = app_memory_break - region_start as usize;
+
+        // It is OK to be overly permissive in setting up the PMP as long as we do not cross the
+        // kernel memory break. This is mostly to fix the QEMU bug.
+        align_region(&mut region_start, &mut region_size);
+
+        let app_memory_break = region_start + region_size;
+
         // Out of memory
         if app_memory_break > kernel_memory_break {
             return Err(());
         }
-
-        // Get size of updated region
-        let region_size = app_memory_break - region_start as usize;
 
         let region = PMPRegion::new(region_start as *const u8, region_size, permissions);
 
@@ -513,32 +600,7 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::MPU
         // configuration of this app has not changed.
         if !last_configured_for_this_app || config.is_dirty.get() {
             for (x, region) in config.regions.iter().enumerate() {
-                match region {
-                    Some(r) => {
-                        let cfg_val = r.cfg.value as usize;
-                        let start = r.location.0 as usize;
-                        let size = r.location.1;
-
-                        let disable_val = (csr::pmpconfig::pmpcfg::r0::CLEAR
-                            + csr::pmpconfig::pmpcfg::w0::CLEAR
-                            + csr::pmpconfig::pmpcfg::x0::CLEAR
-                            + csr::pmpconfig::pmpcfg::a0::OFF)
-                            .value;
-                        let (region_shift, other_region_mask) = if x % 2 == 0 {
-                            (0, 0xFFFF_0000)
-                        } else {
-                            (16, 0x0000_FFFF)
-                        };
-                        csr::CSR.pmpconfig_set(
-                            x / 2,
-                            (disable_val | cfg_val << 8) << region_shift
-                                | (csr::CSR.pmpconfig_get(x / 2) & other_region_mask),
-                        );
-                        csr::CSR.pmpaddr_set(x * 2, (start) >> 2);
-                        csr::CSR.pmpaddr_set((x * 2) + 1, (start + size) >> 2);
-                    }
-                    None => {}
-                };
+                set_pmp_region(region, x);
             }
             config.is_dirty.set(false);
             self.last_configured_for.put(*app_id);
@@ -579,22 +641,12 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::KernelM
         let mut start = memory_start as usize;
         let mut size = memory_size;
 
-        // Region start always has to align to 4 bytes
-        if start % 4 != 0 {
-            start += 4 - (start % 4);
-        }
+        align_region(&mut start, &mut size);
 
-        // Region size always has to align to 4 bytes
-        if size % 4 != 0 {
-            size += 4 - (size % 4);
-        }
-
-        // Regions must be at least 8 bytes
-        if size < 8 {
-            size = 8;
-        }
-
-        let region = PMPRegion::new(start as *const u8, size, permissions);
+        let mut region = PMPRegion::new(start as *const u8, size, permissions);
+        // Once set this should be locked.
+        // NOTE: Locking a TOR region also locks the one before it
+        region.cfg += pmpcfg::l::SET;
 
         config.regions[region_num] = Some(region);
 
@@ -608,57 +660,29 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::KernelM
 
     fn enable_kernel_mpu(&self, config: &mut Self::KernelMpuConfig) {
         for (i, region) in config.regions.iter().rev().enumerate() {
+            // Kernel use the highest regions first as when we switch we use the lowest first
+            // FIXME: Should this not be num_regions? MAX_AVAILABLE_REGIONS_OVER_TWO may not be supported.
             let x = MAX_AVAILABLE_REGIONS_OVER_TWO - i - 1;
-            match region {
-                Some(r) => {
-                    let cfg_val = r.cfg.value as usize;
-                    let start = r.location.0 as usize;
-                    let size = r.location.1;
-
-                    match x % 2 {
-                        0 => {
-                            csr::CSR.pmpaddr_set((x * 2) + 1, (start + size) >> 2);
-                            // Disable access up to the start address
-                            csr::CSR.pmpconfig_modify(
-                                x / 2,
-                                csr::pmpconfig::pmpcfg::r0::CLEAR
-                                    + csr::pmpconfig::pmpcfg::w0::CLEAR
-                                    + csr::pmpconfig::pmpcfg::x0::CLEAR
-                                    + csr::pmpconfig::pmpcfg::a0::CLEAR,
-                            );
-                            csr::CSR.pmpaddr_set(x * 2, start >> 2);
-
-                            // Set access to end address
-                            csr::CSR
-                                .pmpconfig_set(x / 2, cfg_val << 8 | csr::CSR.pmpconfig_get(x / 2));
-                            // Lock the CSR
-                            csr::CSR.pmpconfig_modify(x / 2, csr::pmpconfig::pmpcfg::l1::SET);
-                        }
-                        1 => {
-                            csr::CSR.pmpaddr_set((x * 2) + 1, (start + size) >> 2);
-                            // Disable access up to the start address
-                            csr::CSR.pmpconfig_modify(
-                                x / 2,
-                                csr::pmpconfig::pmpcfg::r2::CLEAR
-                                    + csr::pmpconfig::pmpcfg::w2::CLEAR
-                                    + csr::pmpconfig::pmpcfg::x2::CLEAR
-                                    + csr::pmpconfig::pmpcfg::a2::CLEAR,
-                            );
-                            csr::CSR.pmpaddr_set(x * 2, start >> 2);
-
-                            // Set access to end address
-                            csr::CSR.pmpconfig_set(
-                                x / 2,
-                                cfg_val << 24 | csr::CSR.pmpconfig_get(x / 2),
-                            );
-                            // Lock the CSR
-                            csr::CSR.pmpconfig_modify(x / 2, csr::pmpconfig::pmpcfg::l3::SET);
-                        }
-                        _ => break,
-                    }
-                }
-                None => {}
-            };
+            set_pmp_region(&region, x);
         }
     }
 }
+
+// If we have a PMP and are not using it, we still need to enable it or all accesses will fail
+// It does raise the question why you are using, say, the MMU, rather than the PMP. Not enough PMP entries?
+pub fn pmp_permit_all() {
+    // With NAPOT, the more ones, the bigger the range.
+    csr::CSR.pmpaddr0.set(usize::MAX);
+    csr::CSR.pmpcfg0.write(
+        csr::pmpconfig::pmpcfg::r0::SET
+            + csr::pmpconfig::pmpcfg::w0::SET
+            + csr::pmpconfig::pmpcfg::x0::SET
+            + csr::pmpconfig::pmpcfg::a0::NAPOT,
+    );
+}
+
+kernel::very_simple_component!(
+    impl<{const MAX_AVAILABLE_REGIONS_OVER_TWO: usize}> for PMP::<MAX_AVAILABLE_REGIONS_OVER_TWO>,
+    const_new(&'a mut SingletonChecker),
+    init()
+);

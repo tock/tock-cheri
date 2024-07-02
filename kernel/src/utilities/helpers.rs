@@ -22,6 +22,23 @@ macro_rules! create_capability {
     };};
 }
 
+/// Can create a capability with static storage.
+/// Usage:
+/// ```ignore
+/// use kernel::capabilities::ProcessManagementCapability;
+/// create_static_capability(MY_CAP = MyCap : ProcessManagementCapability);
+/// ```
+/// MyCap can be any type name you don't use elsewhere.
+#[macro_export]
+macro_rules! create_static_capability {
+    (static $id : ident : $t : ident = $T:ty $(,)?) => {
+        struct $t;
+        #[allow(unsafe_code)]
+        unsafe impl $T for $t {}
+        static $id: $t = { $t };
+    };
+}
+
 /// Count the number of passed expressions.
 /// Useful for constructing variable sized arrays in other macros.
 /// Taken from the Little Book of Rust Macros
@@ -36,4 +53,54 @@ macro_rules! count_expressions {
     () => (0usize);
     ($head:expr $(,)?) => (1usize);
     ($head:expr, $($tail:expr),* $(,)?) => (1usize + count_expressions!($($tail),*));
+}
+
+/// A safe (const) array initialisation pattern with an accumulator.
+/// Usage:
+/// ```ignore
+///     let (acc, array) = new_const_array!([ArrayT; N], a_init, |acc, ndx| {...});
+///
+///     // The array will filled as if the following were written:
+///     let acc = a_init;
+///     let mut ndx = 0;
+///     let (elem0, acc) = {...}; ndx +=1;
+///     let (elem1, acc) = {...}; ndx +=1;
+///     ...
+///     let (elemN, acc) = {...}; ndx +=1;
+///     return (acc, [elem0, elem1, ..., elemN])
+/// ```
+/// const fn pointer / trait bounds are still a little broken, so I have provided this as a macro
+/// instead of a function.
+#[macro_export]
+macro_rules! new_const_array {
+    ([$T : ty; $N : expr], $a_init : expr, |$acc : ident, $ndx : ident| {$($t : tt )*}) => {
+        {
+            const UNINIT_ELEM: MaybeUninit<$T> = MaybeUninit::uninit();
+            let mut _uninit_array = [UNINIT_ELEM; $N];
+            let mut $acc = $a_init;
+            let mut $ndx = 0;
+            while $ndx < $N {
+                let (elem, next_acc) = {
+                    // Shadowing the variables in this loop stops them from being modified by a
+                    // naughty bit of user code.
+                    let $ndx = $ndx;
+                    let _uninit_array = [UNINIT_ELEM; $N];
+                    {
+                        $($t)*
+                    }
+                };
+                _uninit_array[$ndx] = MaybeUninit::new(elem);
+                $acc = next_acc;
+                $ndx +=1;
+            }
+            unsafe {
+                // Because the loop may have broken
+                if ($ndx != $N) {
+                    panic!();
+                }
+                // The loop above sets every element
+                ($acc, MaybeUninit::array_assume_init(_uninit_array))
+            }
+        }
+    };
 }

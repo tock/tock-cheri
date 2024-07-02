@@ -32,8 +32,7 @@ mod virtual_uart_rx_test;
 const NUM_PROCS: usize = 4;
 
 // Actual memory for holding the active process structures.
-static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS] =
-    [None, None, None, None];
+static mut PROCESSES: kernel::ProcessArray<NUM_PROCS> = kernel::Kernel::init_process_array();
 
 // Static reference to chip for panic dumps.
 static mut CHIP: Option<&'static stm32f446re::chip::Stm32f4xx<Stm32f446reDefaultPeripherals>> =
@@ -543,7 +542,6 @@ pub unsafe fn main() {
             &mut _sappmem as *mut u8,
             &_eappmem as *const u8 as usize - &_sappmem as *const u8 as usize,
         ),
-        &mut PROCESSES,
         &FAULT_RESPONSE,
         &process_management_capability,
     )

@@ -5,6 +5,7 @@ use core::fmt::Write;
 use crate::process::Process;
 use crate::utilities::binary_write::BinaryWrite;
 use crate::utilities::binary_write::WriteToBinaryOffsetWrapper;
+use crate::very_simple_component;
 
 /// A context token that the caller must pass back to us. This allows us to
 /// track where we are in the print operation.
@@ -63,10 +64,12 @@ pub trait ProcessPrinter {
 pub struct ProcessPrinterText {}
 
 impl ProcessPrinterText {
-    pub fn new() -> ProcessPrinterText {
+    pub const fn new() -> ProcessPrinterText {
         ProcessPrinterText {}
     }
 }
+
+very_simple_component!(impl for ProcessPrinterText, new());
 
 impl ProcessPrinter for ProcessPrinterText {
     // `print_overview()` must be synchronous, but does not assume a synchronous

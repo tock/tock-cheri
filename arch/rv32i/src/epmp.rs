@@ -13,10 +13,12 @@ use crate::csr;
 use core::cell::Cell;
 use core::{cmp, fmt};
 use kernel::platform::mpu;
+use kernel::platform::mpu::RemoveRegionResult;
 use kernel::utilities::cells::{MapCell, OptionalCell};
 use kernel::utilities::registers::interfaces::ReadWriteable;
 use kernel::utilities::registers::{self, register_bitfields};
-use kernel::ProcessId;
+use kernel::ErrorCode::INVAL;
+use kernel::{ErrorCode, ProcessId};
 
 // Generic PMP config
 register_bitfields![u8,
@@ -410,6 +412,8 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::MPU
 {
     type MpuConfig = PMPConfig<MAX_AVAILABLE_REGIONS_OVER_TWO>;
 
+    const MIN_MPUALIGN: usize = 4;
+
     fn clear_mpu(&self) {
         // We want to disable all of the hardware entries, so we use `NUM_REGIONS` here,
         // and not `NUM_REGIONS / 2`.
@@ -515,22 +519,22 @@ impl<const MAX_AVAILABLE_REGIONS_OVER_TWO: usize> kernel::platform::mpu::MPU
         &self,
         region: mpu::Region,
         config: &mut Self::MpuConfig,
-    ) -> Result<(), ()> {
+    ) -> Result<RemoveRegionResult, ErrorCode> {
         let (index, _r) = config
             .regions
             .iter()
             .enumerate()
             .find(|(_idx, r)| r.map_or(false, |r| r == region))
-            .ok_or(())?;
+            .ok_or(INVAL)?;
 
         if config.is_index_locked_or_app(self.locked_region_mask.get(), index) {
-            return Err(());
+            return Err(ErrorCode::INVAL);
         }
 
         config.regions[index] = None;
         config.is_dirty.set(true);
 
-        Ok(())
+        Ok(RemoveRegionResult::Sync)
     }
 
     fn allocate_app_memory_region(

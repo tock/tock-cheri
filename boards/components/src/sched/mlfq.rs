@@ -10,9 +10,8 @@ use core::mem::MaybeUninit;
 use capsules::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
 use kernel::component::Component;
 use kernel::hil::time;
-use kernel::process::Process;
 use kernel::scheduler::mlfq::{MLFQProcessNode, MLFQSched};
-use kernel::static_init_half;
+use kernel::{static_init_half, ProcEntry};
 
 #[macro_export]
 macro_rules! mlfq_component_helper {
@@ -31,13 +30,13 @@ macro_rules! mlfq_component_helper {
 
 pub struct MLFQComponent<A: 'static + time::Alarm<'static>> {
     alarm_mux: &'static MuxAlarm<'static, A>,
-    processes: &'static [Option<&'static dyn Process>],
+    processes: &'static [ProcEntry],
 }
 
 impl<A: 'static + time::Alarm<'static>> MLFQComponent<A> {
     pub fn new(
         alarm_mux: &'static MuxAlarm<'static, A>,
-        processes: &'static [Option<&'static dyn Process>],
+        processes: &'static [ProcEntry],
     ) -> MLFQComponent<A> {
         MLFQComponent {
             alarm_mux,
@@ -72,7 +71,7 @@ impl<A: 'static + time::Alarm<'static>> Component for MLFQComponent<A> {
             let init_node = static_init_half!(
                 node,
                 MLFQProcessNode<'static>,
-                MLFQProcessNode::new(&self.processes[i])
+                MLFQProcessNode::new(&self.processes[i].proc_ref)
             );
             scheduler.processes[0].push_head(init_node);
         }

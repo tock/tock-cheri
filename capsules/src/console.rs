@@ -80,14 +80,16 @@ pub struct App {
     read_len: usize,
 }
 
+pub type ConsoleGrant = Grant<
+    App,
+    UpcallCount<3>,
+    AllowRoCount<{ ro_allow::COUNT }>,
+    AllowRwCount<{ rw_allow::COUNT }>,
+>;
+
 pub struct Console<'a> {
     uart: &'a dyn uart::UartData<'a>,
-    apps: Grant<
-        App,
-        UpcallCount<3>,
-        AllowRoCount<{ ro_allow::COUNT }>,
-        AllowRwCount<{ rw_allow::COUNT }>,
-    >,
+    apps: ConsoleGrant,
     tx_in_progress: OptionalCell<ProcessId>,
     tx_buffer: TakeCell<'static, [u8]>,
     rx_in_progress: OptionalCell<ProcessId>,
@@ -95,16 +97,11 @@ pub struct Console<'a> {
 }
 
 impl<'a> Console<'a> {
-    pub fn new(
+    pub const fn new(
         uart: &'a dyn uart::UartData<'a>,
         tx_buffer: &'static mut [u8],
         rx_buffer: &'static mut [u8],
-        grant: Grant<
-            App,
-            UpcallCount<3>,
-            AllowRoCount<{ ro_allow::COUNT }>,
-            AllowRwCount<{ rw_allow::COUNT }>,
-        >,
+        grant: ConsoleGrant,
     ) -> Console<'a> {
         Console {
             uart: uart,

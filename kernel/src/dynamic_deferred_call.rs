@@ -65,9 +65,11 @@
 //! );
 //! ```
 
+use crate::simple_static_component;
 use core::cell::Cell;
 
 use crate::utilities::cells::OptionalCell;
+use crate::utilities::singleton_checker::SingletonChecker;
 
 /// Kernel-global dynamic deferred call instance
 ///
@@ -80,12 +82,19 @@ pub struct DynamicDeferredCallClientState {
     scheduled: Cell<bool>,
     client: OptionalCell<&'static dyn DynamicDeferredCallClient>,
 }
-impl Default for DynamicDeferredCallClientState {
-    fn default() -> DynamicDeferredCallClientState {
+
+impl DynamicDeferredCallClientState {
+    pub const fn new() -> Self {
         DynamicDeferredCallClientState {
             scheduled: Cell::new(false),
             client: OptionalCell::empty(),
         }
+    }
+}
+
+impl Default for DynamicDeferredCallClientState {
+    fn default() -> DynamicDeferredCallClientState {
+        Self::new()
     }
 }
 
@@ -102,6 +111,111 @@ pub struct DynamicDeferredCall {
     call_pending: Cell<bool>,
 }
 
+pub struct ProtoDynamicDeferredCallUnsized<T: ?Sized> {
+    counter: usize,
+    client_states: T,
+}
+
+pub type ProtoDynamicDeferredCall =
+    ProtoDynamicDeferredCallUnsized<[DynamicDeferredCallClientState]>;
+pub type ProtoDynamicDeferredCallSized<const N: usize> =
+    ProtoDynamicDeferredCallUnsized<[DynamicDeferredCallClientState; N]>;
+
+impl<const N: usize> ProtoDynamicDeferredCallSized<N> {
+    /// Create a prototype for a DynamicDeferredCall. You can register calls with this, and then
+    /// complete it later.
+    pub const fn new() -> Self {
+        const DDCS: DynamicDeferredCallClientState = DynamicDeferredCallClientState::new();
+        Self {
+            counter: 0,
+            client_states: [DDCS; N],
+        }
+    }
+
+    /// Complete constructing the DynamicDeferredCall.
+    /// Once this is done, the completed client_states can be copied to the global.
+    pub const fn complete(
+        self,
+        client_states: &'static [DynamicDeferredCallClientState],
+    ) -> (DynamicDeferredCall, [DynamicDeferredCallClientState; N]) {
+        (
+            DynamicDeferredCall::new_with_counter(client_states, self.counter),
+            self.client_states,
+        )
+    }
+}
+
+impl ProtoDynamicDeferredCall {
+    pub const fn register(
+        &mut self,
+        ddc_client: &'static dyn DynamicDeferredCallClient,
+    ) -> Option<DeferredCallHandle> {
+        let ctr = self.counter;
+        if ctr < self.client_states.len() {
+            self.client_states[ctr].client = OptionalCell::new(ddc_client);
+            self.counter = ctr + 1;
+            Some(DeferredCallHandle(ctr))
+        } else {
+            None
+        }
+    }
+}
+
+/// Dynamic deferred calls with the array inline.
+pub struct DynamicCallsWithArray<const SLOTS: usize> {
+    calls: DynamicDeferredCall,
+    array: [DynamicDeferredCallClientState; SLOTS],
+}
+
+impl<const SLOTS: usize> DynamicCallsWithArray<SLOTS> {
+    pub const fn get(&self) -> &DynamicDeferredCall {
+        &self.calls
+    }
+}
+
+/// Constructs (and registers) the structure to contain Dynamic Deferred Calls
+/// Expects a ProtoDynamicDeferredCall to already have been constructed, and every call to have
+/// been registered.
+/// Usage:
+/// ```ignore
+/// #![feature(macro_metavar_expr)]
+///  // Inside your kernel::define_components! include this component
+///  kernel::define_components!(
+///     // ...
+///     dyn_def : kernel::dynamic_deferred_call::DynamicDeferredCallComponent::<2>,
+///  );
+///  // Inside your const-init construct the prototype
+///  use kernel::dynamic_deferred_call::ProtoDynamicDeferredCallSized;
+///  let mut deferred = ProtoDynamicDeferredCallSized::<2>::new();
+///  construct_components!(
+///    // (a reference to the deferred calls might be an argument to other constructors)
+///    (&mut deferred), // some other component that uses deferred calls
+///    // finally, in construct_components!, pass the prototype to the component
+///    (deferred) // The dyn_def
+///  );
+/// ```
+pub struct DynamicDeferredCallComponent<const SLOTS: usize> {}
+
+simple_static_component!(impl<{const SLOTS: usize}> for DynamicDeferredCallComponent::<SLOTS>,
+    Output = DynamicCallsWithArray::<SLOTS>,
+    NewInput = (ProtoDynamicDeferredCallSized::<SLOTS>, &'a mut SingletonChecker),
+    FinInput = (),
+    | slf, input | {
+        crate::assert_single!(input.1);
+        let (calls, array) = input.0.complete(&slf.array);
+        DynamicCallsWithArray {
+            calls,
+            array
+        }
+    },
+    | slf, _input | {
+        unsafe {
+            // Safety: we used the singleton checker to make sure we didn't construct more than one
+            DynamicDeferredCall::set_global_instance(&slf.calls);
+        }
+    }
+);
+
 impl DynamicDeferredCall {
     /// Construct a new dynamic deferred call implementation
     ///
@@ -111,10 +225,19 @@ impl DynamicDeferredCall {
     ///
     /// The `clients` array can be initialized using the implementation of [Default]
     /// for the [DynamicDeferredCallClientState].
-    pub fn new(client_states: &'static [DynamicDeferredCallClientState]) -> DynamicDeferredCall {
+    pub const fn new(
+        client_states: &'static [DynamicDeferredCallClientState],
+    ) -> DynamicDeferredCall {
+        Self::new_with_counter(client_states, 0)
+    }
+
+    const fn new_with_counter(
+        client_states: &'static [DynamicDeferredCallClientState],
+        counter: usize,
+    ) -> DynamicDeferredCall {
         DynamicDeferredCall {
             client_states,
-            handle_counter: Cell::new(0),
+            handle_counter: Cell::new(counter),
             call_pending: Cell::new(false),
         }
     }

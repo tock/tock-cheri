@@ -2,7 +2,10 @@
 //!
 //!
 
+use crate::utilities::leased_buffer::LeasedBufferCell;
 use crate::ErrorCode;
+use core::cell::Cell;
+use core::marker::PhantomData;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum StopBits {
@@ -325,3 +328,145 @@ pub trait ReceiveAdvanced<'a>: Receive<'a> {
         interbyte_timeout: u8,
     ) -> Result<(), (ErrorCode, &'static mut [u8])>;
 }
+
+/// A zero-copy transmit interface. The client decides on the type of the buffer so the driver
+/// can be agnostic.
+/// Implementations are free to put bounds on `Client::BufT`, the traits `GenBuf{DMA}?{Read|Write}`
+/// are intended to capture most of what would be desired to move around bytes.
+pub trait ZeroTransmit<Client: ZeroTransmitClient> {
+    /// Queue an operation. The callee should call `transmit_finish(buf, Result)` on `Client`
+    /// iff they return `Ok(None)` from this function.
+    /// The callee should not short circuit by calling the callback before returning,
+    /// instead returning `Ok(Some(buf))` if the operation completes early.
+    /// This is to avoid unbounded stack sizes.
+    /// TODO: Possibly the short circuit path should be indicated by EALREADY, or some other ERROR?
+    /// In the event of an error, the buffer is also returned within the `Err(...)`.
+    fn transmit(&self, buf: Client::Buf) -> Result<Option<Client::Buf>, (Client::Buf, ErrorCode)>;
+
+    /// Return the client for this transmitter. Transmitters should contain the storage for their
+    /// clients.
+    fn get_client(&self) -> &Client;
+}
+
+/// Can act as a client for a zero-copy transmitter.
+pub trait ZeroTransmitClient: Sized {
+    /// The type of buffer the client wishes to pass down to the transmitter.
+    type Buf;
+    /// The callback for when a transmission finishes.
+    /// Passes back the buffer, and the result of the transmission.
+    /// an `&self` can be reached using `transmitter.get_client()`.
+    fn transmit_finish<Transmit: ZeroTransmit<Self>>(
+        transmitter: &Transmit,
+        buf: Self::Buf,
+        res: Result<(), ErrorCode>,
+    );
+}
+
+/* A wrapper to make things that support the old interface support the new one. */
+
+/// A zero transmit client that calls the legacy interface
+pub struct ZeroTransmitLegacyWrapper<'a> {
+    client: Cell<Option<&'a dyn TransmitClient>>,
+    leased_buffer: LeasedBufferCell<'static, u8>,
+}
+
+impl<'a> ZeroTransmitLegacyWrapper<'a> {
+    pub const fn new() -> Self {
+        Self {
+            client: Cell::new(None),
+            leased_buffer: LeasedBufferCell::new(),
+        }
+    }
+
+    pub const fn new_with_client(client: &'a dyn TransmitClient) -> Self {
+        Self {
+            client: Cell::new(Some(client)),
+            leased_buffer: LeasedBufferCell::new(),
+        }
+    }
+
+    /// Get a reference that can be used by client of the legacy interface
+    pub const fn transmitter_as_legacy<T: ZeroTransmit<Self>>(
+        transmitter: &T,
+    ) -> &dyn Transmit<'a> {
+        TransmitZeroBridge::get(transmitter)
+    }
+}
+
+impl<'a> ZeroTransmitClient for ZeroTransmitLegacyWrapper<'a> {
+    type Buf = &'static mut [u8];
+
+    fn transmit_finish<Transmit: ZeroTransmit<Self>>(
+        transmitter: &Transmit,
+        buf: Self::Buf,
+        res: Result<(), ErrorCode>,
+    ) {
+        let slf = transmitter.get_client();
+        let buf = slf.leased_buffer.take_buf(buf);
+        if let Some(transmitter) = slf.client.get() {
+            transmitter.transmitted_buffer(buf, buf.len(), res)
+        }
+    }
+}
+
+misc::overload_impl!(TransmitZeroBridge);
+
+impl<'a, Transmitter: ZeroTransmit<ZeroTransmitLegacyWrapper<'a>>> Transmit<'a>
+    for TransmitZeroBridge<Transmitter>
+{
+    fn set_transmit_client(&self, client: &'a dyn TransmitClient) {
+        self.inner.get_client().client.set(Some(client));
+    }
+
+    fn transmit_buffer(
+        &self,
+        tx_buffer: &'static mut [u8],
+        tx_len: usize,
+    ) -> Result<(), (ErrorCode, &'static mut [u8])> {
+        let slf = self.inner.get_client();
+        let buf = slf.leased_buffer.set_lease(tx_buffer, 0..tx_len);
+        match self.inner.transmit(buf) {
+            Ok(Some(buf)) => {
+                // FIXME: this should probably be a deferred callback as there is no short
+                // circuit case supported by the legacy interface.
+                let buf = slf.leased_buffer.take_buf(buf);
+                Err((ErrorCode::ALREADY, buf))
+            }
+            Ok(None) => Ok(()),
+            Err((buf, code)) => {
+                let buf = slf.leased_buffer.take_buf(buf);
+                Err((code, buf))
+            }
+        }
+    }
+
+    fn transmit_word(&self, _word: u32) -> Result<(), ErrorCode> {
+        todo!()
+    }
+
+    fn transmit_abort(&self) -> Result<(), ErrorCode> {
+        todo!()
+    }
+}
+
+/// A factory for a legacy wrapper. Takes a factory for the legacy client as its argument.
+pub struct LegacyTransmitComponent<LegacyFactory>(PhantomData<LegacyFactory>);
+
+use crate::component::StaticComponent;
+use crate::component::StaticComponentFinalize;
+
+crate::simple_static_component!(impl<{LegacyFactory}> for LegacyTransmitComponent::<LegacyFactory> where
+    {
+        LegacyFactory : ~const StaticComponent,
+        LegacyFactory : StaticComponentFinalize,
+        LegacyFactory::Output : TransmitClient
+    },
+    Inherit = LegacyFactory,
+    Output = ZeroTransmitLegacyWrapper<'static>,
+    NewInput = LegacyFactory::NewInput<'a>,
+    FinInput = LegacyFactory::FinaliseInput,
+    |_slf, input, spr| super{input} {
+        ZeroTransmitLegacyWrapper::new_with_client(spr)
+    },
+    |_slf, input, _spr| super{input} {}
+);

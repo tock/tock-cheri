@@ -1,0 +1,14 @@
+[package]
+name = "misc"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+test = true
+
+[dependencies]
+
+[features]
+default = []
+track_potatoes = []
+global_test = []

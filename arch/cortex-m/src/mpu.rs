@@ -7,12 +7,13 @@ use core::fmt;
 
 use kernel;
 use kernel::platform::mpu;
+use kernel::platform::mpu::RemoveRegionResult;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::math;
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
 use kernel::utilities::registers::{register_bitfields, FieldValue, ReadOnly, ReadWrite};
 use kernel::utilities::StaticRef;
-use kernel::ProcessId;
+use kernel::{ErrorCode, ProcessId};
 
 /// MPU Registers for the Cortex-M3, Cortex-M4 and Cortex-M7 families
 /// Described in section 4.5 of
@@ -373,6 +374,8 @@ impl<const NUM_REGIONS: usize, const MIN_REGION_SIZE: usize> mpu::MPU
 {
     type MpuConfig = CortexMConfig<NUM_REGIONS>;
 
+    const MIN_MPUALIGN: usize = MIN_REGION_SIZE;
+
     fn clear_mpu(&self) {
         self.registers.ctrl.write(Control::ENABLE::CLEAR);
     }
@@ -526,22 +529,22 @@ impl<const NUM_REGIONS: usize, const MIN_REGION_SIZE: usize> mpu::MPU
         &self,
         region: mpu::Region,
         config: &mut Self::MpuConfig,
-    ) -> Result<(), ()> {
+    ) -> Result<RemoveRegionResult, ErrorCode> {
         let (idx, _r) = config
             .regions
             .iter()
             .enumerate()
             .find(|(_idx, r)| **r == region)
-            .ok_or(())?;
+            .ok_or(ErrorCode::FAIL)?;
 
         if idx == APP_MEMORY_REGION_NUM {
-            return Err(());
+            return Err(ErrorCode::INVAL);
         }
 
         config.regions[idx] = CortexMRegion::empty(idx);
         config.is_dirty.set(true);
 
-        Ok(())
+        Ok(RemoveRegionResult::Sync)
     }
 
     fn allocate_app_memory_region(

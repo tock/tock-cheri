@@ -223,7 +223,7 @@ impl MacUser<'_> {
 }
 
 impl<'a> ListNode<'a, MacUser<'a>> for MacUser<'a> {
-    fn next(&'a self) -> &'a ListLink<'a, MacUser<'a>> {
+    fn next(&self) -> &ListLink<'a, MacUser<'a>> {
         &self.next
     }
 }

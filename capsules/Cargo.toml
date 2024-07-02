@@ -7,4 +7,5 @@ edition = "2021"
 [dependencies]
 kernel = { path = "../kernel" }
 enum_primitive = { path = "../libraries/enum_primitive" }
+misc = { path = "../libraries/misc" }
 tickv = { path = "../libraries/tickv" }

@@ -21,16 +21,17 @@
 
 use capsules::console;
 use capsules::virtual_uart::{MuxUart, UartDevice};
-use kernel::capabilities;
 use kernel::component::Component;
 use kernel::create_capability;
-use kernel::dynamic_deferred_call::DynamicDeferredCall;
+use kernel::dynamic_deferred_call::{DynamicDeferredCall, ProtoDynamicDeferredCall};
 use kernel::hil;
 use kernel::hil::uart;
 use kernel::static_init;
 use kernel::utilities::static_init::StaticUninitializedBuffer;
+use kernel::{capabilities, simple_static_component};
 
-use capsules::console::DEFAULT_BUF_SIZE;
+use capsules::console::{Console, DEFAULT_BUF_SIZE};
+use kernel::hil::uart::{Receive, Transmit};
 
 pub struct UartMuxComponent {
     uart: &'static dyn uart::Uart<'static>,
@@ -64,6 +65,7 @@ impl Component for UartMuxComponent {
                 &mut capsules::virtual_uart::RX_BUF,
                 self.baud_rate,
                 self.deferred_caller,
+                None,
             )
         );
         uart_mux.initialize_callback_handle(
@@ -144,3 +146,42 @@ impl Component for ConsoleComponent {
         console
     }
 }
+
+pub struct UartMuxClientComponent();
+
+simple_static_component!(impl for UartMuxClientComponent,
+    Output = UartDevice<'static>,
+    NewInput = (&'static MuxUart<'static>, bool),
+    FinInput = (),
+    |_slf, input| {UartDevice::new(input.0, input.1)},
+    |slf, _input| {slf.setup()}
+);
+
+simple_static_component!(impl for ConsoleComponent,
+    Inherit = UartMuxClientComponent,
+    Output = Console<'static>,
+    BUFFER_BYTES = 2 * DEFAULT_BUF_SIZE,
+    NewInput = (&'static MuxUart<'static>, capsules::console::ConsoleGrant),
+    FinInput = (),
+    |_slf, input, buf, supe | super{(input.0, true)} {
+        let (b1, b2) : (&mut [u8; DEFAULT_BUF_SIZE], &mut [u8; DEFAULT_BUF_SIZE]) = kernel::component::split_array_mut::<u8, {2 * DEFAULT_BUF_SIZE}, DEFAULT_BUF_SIZE, DEFAULT_BUF_SIZE>(buf);
+        Console::new(supe, b1, b2, input.1)
+    },
+    |slf, _input, supe | super{()} {
+             supe.set_transmit_client(slf);
+             supe.set_receive_client(slf);
+     }
+);
+
+simple_static_component!(impl for UartMuxComponent,
+    Output = MuxUart<'static>,
+    BUFFER_BYTES = capsules::virtual_uart::RX_BUF_LEN,
+    NewInput = (&'static dyn uart::Uart<'static>, u32, &'static DynamicDeferredCall, &'a mut ProtoDynamicDeferredCall),
+    FinInput = &'static dyn uart::Uart<'static>,
+    |slf, input, buf | {MuxUart::new(input.0, buf, input.1, input.2, input.3.register(slf))},
+    |slf, input | {
+            slf.initialize();
+            input.set_transmit_client(slf);
+            input.set_receive_client(slf);
+    }
+);

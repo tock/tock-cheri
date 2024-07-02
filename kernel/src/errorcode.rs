@@ -43,6 +43,19 @@ pub enum ErrorCode {
     NOACK = 13,
 }
 
+// Implementing a few tuple destruction's makes ? work better
+
+impl<T> From<(ErrorCode, T)> for ErrorCode {
+    fn from(value: (ErrorCode, T)) -> Self {
+        value.0
+    }
+}
+impl<T, U> From<(ErrorCode, T, U)> for ErrorCode {
+    fn from(value: (ErrorCode, T, U)) -> Self {
+        value.0
+    }
+}
+
 impl From<ErrorCode> for usize {
     fn from(err: ErrorCode) -> usize {
         err as usize

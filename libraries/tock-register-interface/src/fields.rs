@@ -270,7 +270,7 @@ impl<T: UIntLike, R: RegisterLongName> FieldValue<T, R> {
 }
 
 // Combine two fields with the addition operator
-impl<T: UIntLike, R: RegisterLongName> Add for FieldValue<T, R> {
+impl<T: UIntLike + ~const core::ops::BitOr, R: RegisterLongName> const Add for FieldValue<T, R> {
     type Output = Self;
 
     #[inline]

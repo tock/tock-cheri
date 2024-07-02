@@ -1,3 +1,4 @@
+#![feature(const_trait_impl)]
 //! Tock Register Interface
 //!
 //! Provides efficient mechanisms to express and use type-checked

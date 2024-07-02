@@ -100,7 +100,7 @@ impl<'a, A: hil::adc::Adc> AdcDevice<'a, A> {
 }
 
 impl<'a, A: hil::adc::Adc> ListNode<'a, AdcDevice<'a, A>> for AdcDevice<'a, A> {
-    fn next(&'a self) -> &'a ListLink<'a, AdcDevice<'a, A>> {
+    fn next(&self) -> &ListLink<'a, AdcDevice<'a, A>> {
         &self.next
     }
 }

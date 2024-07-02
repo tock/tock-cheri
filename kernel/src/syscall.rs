@@ -3,10 +3,11 @@
 use core::convert::TryFrom;
 use core::fmt::Write;
 
+use crate::cheri::{cheri_perms, cptr, CPtrOps};
 use crate::errorcode::ErrorCode;
 use crate::process;
 
-pub use crate::syscall_driver::{CommandReturn, SyscallDriver};
+pub use crate::syscall_driver::{CommandReturn, CommandReturnResult, SyscallDriver};
 
 /// Helper function to split a u64 into a higher and lower u32.
 ///
@@ -84,8 +85,10 @@ pub enum Syscall {
     Subscribe {
         driver_number: usize,
         subdriver_number: usize,
-        upcall_ptr: *mut (),
-        appdata: usize,
+        // On a CHERI platform we need to maintain the full width as these are passed back
+        // to userspace
+        upcall_ptr: cptr,
+        appdata: cptr,
     },
 
     /// Structure representing an invocation of the Command system call class.
@@ -157,52 +160,52 @@ impl Syscall {
     pub fn from_register_arguments(
         syscall_number: u8,
         r0: usize,
-        r1: usize,
-        r2: usize,
-        r3: usize,
+        r1: cptr,
+        r2: cptr,
+        r3: cptr,
     ) -> Option<Syscall> {
         match SyscallClass::try_from(syscall_number) {
             Ok(SyscallClass::Yield) => Some(Syscall::Yield {
-                which: r0,
-                address: r1 as *mut u8,
+                which: r0.into(),
+                address: r1.as_ptr_checked(1, cheri_perms::STORE) as *mut u8,
             }),
             Ok(SyscallClass::Subscribe) => Some(Syscall::Subscribe {
                 driver_number: r0,
-                subdriver_number: r1,
-                upcall_ptr: r2 as *mut (),
+                subdriver_number: r1.into(),
+                upcall_ptr: r2,
                 appdata: r3,
             }),
             Ok(SyscallClass::Command) => Some(Syscall::Command {
                 driver_number: r0,
-                subdriver_number: r1,
-                arg0: r2,
-                arg1: r3,
+                subdriver_number: r1.into(),
+                arg0: r2.into(),
+                arg1: r3.into(),
             }),
             Ok(SyscallClass::ReadWriteAllow) => Some(Syscall::ReadWriteAllow {
                 driver_number: r0,
-                subdriver_number: r1,
-                allow_address: r2 as *mut u8,
-                allow_size: r3,
+                subdriver_number: r1.into(),
+                allow_address: r2.as_ptr_checked(r3.into(), cheri_perms::DEFAULT_RW) as *mut u8,
+                allow_size: r3.into(),
             }),
             Ok(SyscallClass::UserspaceReadableAllow) => Some(Syscall::UserspaceReadableAllow {
                 driver_number: r0,
-                subdriver_number: r1,
-                allow_address: r2 as *mut u8,
-                allow_size: r3,
+                subdriver_number: r1.into(),
+                allow_address: r2.as_ptr_checked(r3.into(), cheri_perms::DEFAULT_R) as *mut u8,
+                allow_size: r3.into(),
             }),
             Ok(SyscallClass::ReadOnlyAllow) => Some(Syscall::ReadOnlyAllow {
                 driver_number: r0,
-                subdriver_number: r1,
-                allow_address: r2 as *const u8,
-                allow_size: r3,
+                subdriver_number: r1.into(),
+                allow_address: r2.as_ptr_checked(r3.into(), cheri_perms::DEFAULT_R) as *mut u8,
+                allow_size: r3.into(),
             }),
             Ok(SyscallClass::Memop) => Some(Syscall::Memop {
                 operand: r0,
-                arg0: r1,
+                arg0: r1.into(),
             }),
             Ok(SyscallClass::Exit) => Some(Syscall::Exit {
                 which: r0,
-                completion_code: r1,
+                completion_code: r1.into(),
             }),
             Err(_) => None,
         }
@@ -271,6 +274,9 @@ pub enum SyscallReturn {
     /// data field
     SuccessU32U64(u32, u64),
 
+    /// Generic success case, with an additional (possibly capability-width) pointer
+    /// On CHERI, this grants authority. Access to this return is therefore privileged
+    SuccessPtr(cptr),
     // These following types are used by the scheduler so that it can
     // return values to userspace in an architecture (pointer-width)
     // independent way. The kernel passes these types (rather than
@@ -281,6 +287,14 @@ pub enum SyscallReturn {
     // (pointers out of valid memory), the kernel cannot construct an
     // ProcessBuffer or Upcall type but needs to be able to return a
     // failure. -pal 11/24/20
+    // FIXME: We need to think about what these look like on CHERI
+    // Really, things that were capabilities should come back as capabilities.
+    // However, we discarded all capability information at the syscall boundary.
+    // We could always use our own DDC, with just the permissions and length implied by the
+    // specific syscall. This would certainly got give userspace _extra_ authority,
+    // but might rob them of some bounds / permissions. This is what is implemented currently.
+    // Preferable behavior is not to discard the capability so early (it should make it as far
+    // as grant is stored in grant allow slots)
     /// Read/Write allow success case, returns the previous allowed
     /// buffer and size to the process.
     AllowReadWriteSuccess(*mut u8, usize),
@@ -321,6 +335,18 @@ impl SyscallReturn {
         res.into_inner()
     }
 
+    /// Construct either SuccessU32 or SuccessU64 depending on platform.
+    #[allow(non_snake_case)]
+    pub(crate) fn SuccessUSize(val: usize) -> Self {
+        if core::mem::size_of::<usize>() == 8 {
+            SyscallReturn::SuccessU64(val as u64)
+        } else if core::mem::size_of::<usize>() == 4 {
+            SyscallReturn::SuccessU32(val as u32)
+        } else {
+            panic!();
+        }
+    }
+
     /// Returns true if the `SyscallReturn` is any success type.
     pub(crate) fn is_success(&self) -> bool {
         match self {
@@ -330,6 +356,7 @@ impl SyscallReturn {
             SyscallReturn::SuccessU32U32U32(_, _, _) => true,
             SyscallReturn::SuccessU64(_) => true,
             SyscallReturn::SuccessU32U64(_, _) => true,
+            SyscallReturn::SuccessPtr(_) => true,
             SyscallReturn::AllowReadWriteSuccess(_, _) => true,
             SyscallReturn::UserspaceReadableAllowSuccess(_, _) => true,
             SyscallReturn::AllowReadOnlySuccess(_, _) => true,
@@ -347,107 +374,171 @@ impl SyscallReturn {
 
     /// Encode the system call return value into 4 registers, following
     /// the encoding specified in TRD104. Architectures which do not follow
-    /// TRD104 are free to define their own encoding.
+    /// TRD104 are free to define their own encoding.>
+    /// TODO: deprecate in favour of the more general one
     pub fn encode_syscall_return(&self, a0: &mut u32, a1: &mut u32, a2: &mut u32, a3: &mut u32) {
+        if core::mem::size_of::<cptr>() == core::mem::size_of::<u32>() {
+            // SAFETY: if the two unsized integers are the same size references to them
+            // can be safely transmuted.
+            // Ugly coercion could be avoided by first copying to the stack, then assigning with
+            // "as" in order to satisfy the compiler. But I expect this function will disappear
+            // in favour of just using the usize one.
+            unsafe {
+                let (a0, a1, a2, a3) = core::mem::transmute((a0, a1, a2, a3));
+                self.encode_syscall_return_cptr(a0, a1, a2, a3);
+            }
+        } else {
+            panic!("encode_syscall_return used on a 64-bit platform or CHERI platform")
+        }
+    }
+
+    /// The obvious extension of TRD104 that works for 32-bit and 64-bit platforms.
+    /// This makes no changes to TRD104 on 32-bit platforms.
+    /// On 64-bit platforms, both 64-bit and usize values are passed as a single register,
+    /// shifting down register number if that means fewer registers are needed needed.
+    /// For usize, this is the obvious choice.
+    /// For explicitly 64-bit arguments, this would require rewriting prototypes for userspace
+    /// functions between 32 and 64 bit platforms.
+    /// However, no driver currently USES any 64-bit values.
+    /// Any new ones on 64-bit platforms would likely prefer just passing the value.
+    /// If they would not, I suspect many really want usize anyway (and that is what is used for
+    /// the syscalls handled directly by the kernel). Maybe they should be written in terms of that,
+    /// and some helpful aliases created for FailureUSIZE etc.
+    /// I think packing two 32-bit values into 64-bits would gain nothing and pollute a whole lot
+    /// of user code.
+    /// I have not considered usize other than 4 and 8 bytes.
+    /// Also handles the CHERI extension as follows:
+    /// the high part of any cptr register is zero'd if any non capability-sized arguments are
+    /// passed.
+    /// SuccessPtr is as passed the full cptr register.
+    /// Pointers from allow'd buffers have minimal bounds attached that cover their length,
+    /// and the same permissions that were checked at the syscall boundary.
+    pub fn encode_syscall_return_cptr(
+        &self,
+        a0: &mut cptr,
+        a1: &mut cptr,
+        a2: &mut cptr,
+        a3: &mut cptr,
+    ) {
+        // On 32-bit CHERI, given that capabilities cannot be used as 64-bit integers, 64-bit
+        // integers will still be returned as two 32-bit values in different registers.
+        fn write_64(a: &mut cptr, b: &mut cptr, val: u64) {
+            let is_64_bit = core::mem::size_of::<usize>() == 8;
+            if !is_64_bit {
+                let (msb, lsb) = u64_to_be_u32s(val);
+                *a = (lsb as usize).into();
+                *b = (msb as usize).into();
+            } else {
+                *a = (val as usize).into();
+            }
+        }
+
+        // Given that the user initially provided a capability of a size that covered length, and
+        // with all the appropriate permissions, it is safe to give them that much back.
+        // Given that the original existed, it is okay not to use the exact set bounds
+        fn rederive(addr: usize, len: usize, perms: usize) -> cptr {
+            let mut result = cptr::default();
+            result.set_addr_from_ddc(addr);
+            result.set_bounds(len);
+            result.and_perms(perms);
+            result
+        }
+
         match self {
             &SyscallReturn::Failure(e) => {
-                *a0 = SyscallReturnVariant::Failure as u32;
-                *a1 = usize::from(e) as u32;
+                *a0 = (SyscallReturnVariant::Failure as usize).into();
+                *a1 = (usize::from(e)).into();
             }
             &SyscallReturn::FailureU32(e, data0) => {
-                *a0 = SyscallReturnVariant::FailureU32 as u32;
-                *a1 = usize::from(e) as u32;
-                *a2 = data0;
+                *a0 = (SyscallReturnVariant::FailureU32 as usize).into();
+                *a1 = usize::from(e).into();
+                *a2 = (data0 as usize).into();
             }
             &SyscallReturn::FailureU32U32(e, data0, data1) => {
-                *a0 = SyscallReturnVariant::FailureU32U32 as u32;
-                *a1 = usize::from(e) as u32;
-                *a2 = data0;
-                *a3 = data1;
+                *a0 = (SyscallReturnVariant::FailureU32U32 as usize).into();
+                *a1 = (usize::from(e)).into();
+                *a2 = (data0 as usize).into();
+                *a3 = (data1 as usize).into();
             }
             &SyscallReturn::FailureU64(e, data0) => {
-                let (data0_msb, data0_lsb) = u64_to_be_u32s(data0);
-                *a0 = SyscallReturnVariant::FailureU64 as u32;
-                *a1 = usize::from(e) as u32;
-                *a2 = data0_lsb;
-                *a3 = data0_msb;
+                *a0 = (SyscallReturnVariant::FailureU64 as usize).into();
+                *a1 = (usize::from(e) as usize).into();
+                write_64(a2, a3, data0)
             }
             &SyscallReturn::Success => {
-                *a0 = SyscallReturnVariant::Success as u32;
+                *a0 = (SyscallReturnVariant::Success as usize).into();
             }
             &SyscallReturn::SuccessU32(data0) => {
-                *a0 = SyscallReturnVariant::SuccessU32 as u32;
-                *a1 = data0;
+                *a0 = (SyscallReturnVariant::SuccessU32 as usize).into();
+                *a1 = (data0 as usize).into();
             }
             &SyscallReturn::SuccessU32U32(data0, data1) => {
-                *a0 = SyscallReturnVariant::SuccessU32U32 as u32;
-                *a1 = data0;
-                *a2 = data1;
+                *a0 = (SyscallReturnVariant::SuccessU32U32 as usize).into();
+                *a1 = (data0 as usize).into();
+                *a2 = (data1 as usize).into();
             }
             &SyscallReturn::SuccessU32U32U32(data0, data1, data2) => {
-                *a0 = SyscallReturnVariant::SuccessU32U32U32 as u32;
-                *a1 = data0;
-                *a2 = data1;
-                *a3 = data2;
+                *a0 = (SyscallReturnVariant::SuccessU32U32U32 as usize).into();
+                *a1 = (data0 as usize).into();
+                *a2 = (data1 as usize).into();
+                *a3 = (data2 as usize).into();
             }
             &SyscallReturn::SuccessU64(data0) => {
-                let (data0_msb, data0_lsb) = u64_to_be_u32s(data0);
-
-                *a0 = SyscallReturnVariant::SuccessU64 as u32;
-                *a1 = data0_lsb;
-                *a2 = data0_msb;
+                *a0 = (SyscallReturnVariant::SuccessU64 as usize).into();
+                write_64(a1, a2, data0);
             }
             &SyscallReturn::SuccessU32U64(data0, data1) => {
-                let (data1_msb, data1_lsb) = u64_to_be_u32s(data1);
-
-                *a0 = SyscallReturnVariant::SuccessU32U64 as u32;
-                *a1 = data0;
-                *a2 = data1_lsb;
-                *a3 = data1_msb;
+                *a0 = (SyscallReturnVariant::SuccessU32U64 as usize).into();
+                *a1 = (data0 as usize).into();
+                write_64(a2, a3, data1.into());
             }
             &SyscallReturn::AllowReadWriteSuccess(ptr, len) => {
-                *a0 = SyscallReturnVariant::SuccessU32U32 as u32;
-                *a1 = ptr as u32;
-                *a2 = len as u32;
+                *a0 = (SyscallReturnVariant::Success as usize).into();
+                *a1 = rederive(ptr as usize, len, cheri_perms::DEFAULT_RW);
+                *a2 = (len as usize).into();
             }
             &SyscallReturn::UserspaceReadableAllowSuccess(ptr, len) => {
-                *a0 = SyscallReturnVariant::SuccessU32U32 as u32;
-                *a1 = ptr as u32;
-                *a2 = len as u32;
+                *a0 = (SyscallReturnVariant::Success as usize).into();
+                *a1 = rederive(ptr as usize, len, cheri_perms::DEFAULT_R);
+                *a2 = (len as usize).into();
             }
             &SyscallReturn::AllowReadWriteFailure(err, ptr, len) => {
-                *a0 = SyscallReturnVariant::FailureU32U32 as u32;
-                *a1 = usize::from(err) as u32;
-                *a2 = ptr as u32;
-                *a3 = len as u32;
+                *a0 = (SyscallReturnVariant::Failure as usize).into();
+                *a1 = (usize::from(err) as usize).into();
+                *a2 = rederive(ptr as usize, len, cheri_perms::DEFAULT_RW);
+                *a3 = (len as usize).into();
             }
             &SyscallReturn::UserspaceReadableAllowFailure(err, ptr, len) => {
-                *a0 = SyscallReturnVariant::FailureU32U32 as u32;
-                *a1 = usize::from(err) as u32;
-                *a2 = ptr as u32;
-                *a3 = len as u32;
+                *a0 = (SyscallReturnVariant::Failure as usize).into();
+                *a1 = (usize::from(err)).into();
+                *a2 = rederive(ptr as usize, len, cheri_perms::DEFAULT_R);
+                *a3 = (len as usize).into();
             }
             &SyscallReturn::AllowReadOnlySuccess(ptr, len) => {
-                *a0 = SyscallReturnVariant::SuccessU32U32 as u32;
-                *a1 = ptr as u32;
-                *a2 = len as u32;
+                *a0 = (SyscallReturnVariant::Success as usize).into();
+                *a1 = rederive(ptr as usize, len, cheri_perms::DEFAULT_R);
+                *a2 = (len as usize).into();
             }
             &SyscallReturn::AllowReadOnlyFailure(err, ptr, len) => {
-                *a0 = SyscallReturnVariant::FailureU32U32 as u32;
-                *a1 = usize::from(err) as u32;
-                *a2 = ptr as u32;
-                *a3 = len as u32;
+                *a0 = (SyscallReturnVariant::Failure as usize).into();
+                *a1 = (usize::from(err)).into();
+                *a2 = rederive(ptr as usize, len, cheri_perms::DEFAULT_R);
+                *a3 = (len as usize).into();
             }
             &SyscallReturn::SubscribeSuccess(ptr, data) => {
-                *a0 = SyscallReturnVariant::SuccessU32U32 as u32;
-                *a1 = ptr as u32;
-                *a2 = data as u32;
+                *a0 = (SyscallReturnVariant::Success as usize).into();
+                *a1 = (ptr as usize).into();
+                *a2 = (data as usize).into();
             }
             &SyscallReturn::SubscribeFailure(err, ptr, data) => {
-                *a0 = SyscallReturnVariant::FailureU32U32 as u32;
-                *a1 = usize::from(err) as u32;
-                *a2 = ptr as u32;
-                *a3 = data as u32;
+                *a0 = (SyscallReturnVariant::Failure as usize).into();
+                *a1 = (usize::from(err)).into();
+                *a2 = (ptr as usize).into();
+                *a3 = (data as usize).into();
+            }
+            &SyscallReturn::SuccessPtr(cptr) => {
+                *a0 = (SyscallReturnVariant::Success as usize).into();
+                *a1 = cptr;
             }
         }
     }
@@ -542,6 +633,24 @@ pub trait UserspaceKernelBoundary {
         app_brk: *const u8,
         state: &mut Self::StoredState,
     ) -> Result<(), ()>;
+
+    /// Get extra arguments. This should only be called in the context of handling a syscall,
+    /// otherwise the values returned may not be meaningful.
+    /// ### Safety
+    ///
+    /// This function guarantees that it if needs to change process memory, it
+    /// will only change memory starting at `accessible_memory_start` and before
+    /// `app_brk`. The caller is responsible for guaranteeing that those
+    /// pointers are valid for the process.
+    unsafe fn get_extra_syscall_arg(
+        &self,
+        _ndx: usize,
+        _accessible_memory_start: *const u8,
+        _app_brk: *const u8,
+        _state: &Self::StoredState,
+    ) -> Option<usize> {
+        None
+    }
 
     /// Set the return value the process should see when it begins executing
     /// again after the syscall. This will only be called after a process has

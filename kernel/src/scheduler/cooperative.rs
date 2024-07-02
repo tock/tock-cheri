@@ -16,15 +16,16 @@ use crate::kernel::{Kernel, StoppedExecutingReason};
 use crate::platform::chip::Chip;
 use crate::process::Process;
 use crate::scheduler::{Scheduler, SchedulingDecision};
+use core::cell::Cell;
 
 /// A node in the linked list the scheduler uses to track processes
 pub struct CoopProcessNode<'a> {
-    proc: &'static Option<&'static dyn Process>,
+    proc: &'static Cell<Option<&'static dyn Process>>,
     next: ListLink<'a, CoopProcessNode<'a>>,
 }
 
 impl<'a> CoopProcessNode<'a> {
-    pub fn new(proc: &'static Option<&'static dyn Process>) -> CoopProcessNode<'a> {
+    pub fn new(proc: &'static Cell<Option<&'static dyn Process>>) -> CoopProcessNode<'a> {
         CoopProcessNode {
             proc,
             next: ListLink::empty(),
@@ -33,7 +34,7 @@ impl<'a> CoopProcessNode<'a> {
 }
 
 impl<'a> ListNode<'a, CoopProcessNode<'a>> for CoopProcessNode<'a> {
-    fn next(&'a self) -> &'a ListLink<'a, CoopProcessNode> {
+    fn next(&self) -> &ListLink<'a, CoopProcessNode<'a>> {
         &self.next
     }
 }
@@ -63,7 +64,7 @@ impl<'a, C: Chip> Scheduler<C> for CooperativeSched<'a> {
             // Find next ready process. Place any *empty* process slots, or not-ready
             // processes, at the back of the queue.
             for node in self.processes.iter() {
-                match node.proc {
+                match node.proc.get() {
                     Some(proc) => {
                         if proc.ready() {
                             next = Some(proc.processid());

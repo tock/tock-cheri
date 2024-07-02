@@ -5,7 +5,7 @@ use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::Writeable;
 use kernel::utilities::registers::{register_structs, ReadWrite};
 use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::{ErrorCode, StaticRefGEP};
 use rv32i::machine_timer::MachineTimer;
 
 register_structs! {
@@ -24,19 +24,19 @@ register_structs! {
 pub struct Clint<'a> {
     registers: StaticRef<ClintRegisters>,
     client: OptionalCell<&'a dyn time::AlarmClient>,
-    mtimer: MachineTimer<'a>,
+    mtimer: MachineTimer<'a, StaticRef<ReadWrite<u32>>>,
 }
 
 impl<'a> Clint<'a> {
-    pub fn new(base: &'a StaticRef<ClintRegisters>) -> Self {
+    pub const fn new(base: &'a StaticRef<ClintRegisters>) -> Self {
         Self {
             registers: *base,
             client: OptionalCell::empty(),
             mtimer: MachineTimer::new(
-                &base.compare_low,
-                &base.compare_high,
-                &base.value_low,
-                &base.value_high,
+                StaticRefGEP!(base, compare_low),
+                StaticRefGEP!(base, compare_high),
+                StaticRefGEP!(base, value_low),
+                StaticRefGEP!(base, value_high),
             ),
         }
     }
@@ -137,3 +137,5 @@ impl kernel::platform::scheduler_timer::SchedulerTimer for Clint<'_> {
         //csr::CSR.mie.modify(csr::mie::mie::mtimer::CLEAR);
     }
 }
+
+kernel::very_simple_component!(impl for Clint<'static>, new(&'static StaticRef<ClintRegisters>));

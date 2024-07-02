@@ -52,7 +52,7 @@ use kernel::hil::uart;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::ErrorCode;
 
-const RX_BUF_LEN: usize = 64;
+pub const RX_BUF_LEN: usize = 64;
 pub static mut RX_BUF: [u8; RX_BUF_LEN] = [0; RX_BUF_LEN];
 
 pub struct MuxUart<'a> {
@@ -190,11 +190,12 @@ impl<'a> uart::ReceiveClient for MuxUart<'a> {
 }
 
 impl<'a> MuxUart<'a> {
-    pub fn new(
+    pub const fn new(
         uart: &'a dyn uart::Uart<'a>,
         buffer: &'static mut [u8],
         speed: u32,
         deferred_caller: &'a DynamicDeferredCall,
+        handle: Option<DeferredCallHandle>,
     ) -> MuxUart<'a> {
         MuxUart {
             uart: uart,
@@ -204,7 +205,7 @@ impl<'a> MuxUart<'a> {
             buffer: TakeCell::new(buffer),
             completing_read: Cell::new(false),
             deferred_caller: deferred_caller,
-            handle: OptionalCell::empty(),
+            handle: OptionalCell::new_option(handle),
         }
     }
 
@@ -339,7 +340,7 @@ pub struct UartDevice<'a> {
 }
 
 impl<'a> UartDevice<'a> {
-    pub fn new(mux: &'a MuxUart<'a>, receiver: bool) -> UartDevice<'a> {
+    pub const fn new(mux: &'a MuxUart<'a>, receiver: bool) -> UartDevice<'a> {
         UartDevice {
             state: Cell::new(UartDeviceReceiveState::Idle),
             mux: mux,
@@ -398,7 +399,7 @@ impl<'a> uart::ReceiveClient for UartDevice<'a> {
 }
 
 impl<'a> ListNode<'a, UartDevice<'a>> for UartDevice<'a> {
-    fn next(&'a self) -> &'a ListLink<'a, UartDevice<'a>> {
+    fn next(&self) -> &ListLink<'a, UartDevice<'a>> {
         &self.next
     }
 }

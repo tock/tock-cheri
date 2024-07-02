@@ -16,9 +16,11 @@ if [ ! -x tools/run_cargo_fmt.sh ]; then
 fi
 
 # Add the rustfmt component if needed.
-if ! rustup component list | grep 'rustfmt.*(installed)' -q; then
-	# Some versions of OS X want the -preview version, retry that on failure
-	rustup component add rustfmt || rustup component add rustfmt-preview
+if ! rustup which rustfmt; then
+  if ! rustup component list | grep 'rustfmt.*(installed)' -q; then
+    # Some versions of OS X want the -preview version, retry that on failure
+    rustup component add rustfmt || rustup component add rustfmt-preview
+  fi
 fi
 
 # Format overwrites changes, which is probably good, but it's nice to see

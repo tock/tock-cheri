@@ -71,14 +71,17 @@ impl KernelInfo {
         count.get()
     }
 
-    /// Get the name of the process.
-    pub fn process_name(
+    /// Get the name of the process in a limited scope.
+    /// A process name may not be in static memory.
+    pub fn with_process_name<R, F: FnOnce(&str) -> R>(
         &self,
         app: ProcessId,
         _capability: &dyn ProcessManagementCapability,
     ) -> &'static str {
-        self.kernel
-            .process_map_or("unknown", app, |process| process.get_process_name())
+        match self.kernel.get_process(app) {
+            None => "unknown",
+            Some(process) => process.get_process_name(),
+        }
     }
 
     /// Returns the number of syscalls the app has called.

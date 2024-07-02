@@ -8,4 +8,7 @@ edition = "2021"
 kernel = { path = "../../kernel" }
 tock-registers = { path = "../../libraries/tock-register-interface" }
 riscv-csr = { path = "../../libraries/riscv-csr" }
+misc = { path = "../../libraries/misc" }
 
+[features]
+page_align_pmp = []

@@ -29,8 +29,7 @@ const NUM_PROCS: usize = 4;
 const FAULT_RESPONSE: kernel::process::PanicFaultPolicy = kernel::process::PanicFaultPolicy {};
 
 // Actual memory for holding the active process structures.
-static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS] =
-    [None, None, None, None];
+static mut PROCESSES: kernel::ProcessArray<NUM_PROCS> = kernel::Kernel::init_process_array();
 
 // Reference to the chip for panic dumps.
 static mut CHIP: Option<&'static arty_e21_chip::chip::ArtyExx<ArtyExxDefaultPeripherals>> = None;
@@ -286,7 +285,6 @@ pub unsafe fn main() {
             &mut _sappmem as *mut u8,
             &_eappmem as *const u8 as usize - &_sappmem as *const u8 as usize,
         ),
-        &mut PROCESSES,
         &FAULT_RESPONSE,
         &process_mgmt_cap,
     )
