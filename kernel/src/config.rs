@@ -35,13 +35,13 @@
 ///
 /// To change the configuration, modify the relevant values in the `CONFIG`
 /// constant object defined at the end of this file.
-pub(crate) struct Config {
+pub struct Config {
     /// Whether the kernel should trace syscalls to the debug output.
     ///
     /// If enabled, the kernel will print a message in the debug output for each
     /// system call and upcall, with details including the application ID, and
     /// system call or upcall parameters.
-    pub(crate) trace_syscalls: bool,
+    pub trace_syscalls: bool,
 
     /// Whether the kernel should show debugging output when loading processes.
     ///
@@ -49,7 +49,7 @@ pub(crate) struct Config {
     /// loaded in flash and into which SRAM addresses. This can be useful to
     /// debug whether the kernel could successfully load processes, and whether
     /// the allocated SRAM is as expected.
-    pub(crate) debug_load_processes: bool,
+    pub debug_load_processes: bool,
 
     /// Whether the kernel should output additional debug information on panics.
     ///
@@ -70,7 +70,7 @@ pub(crate) struct Config {
     // https://github.com/tock/tock/pull/2759). Until a more complete solution
     // is identified, using configuration constants is the most effective
     // option.
-    pub(crate) debug_panics: bool,
+    pub debug_panics: bool,
 
     /// Whether the kernbel should output debug information when it is checking
     /// the cryptographic credentials of a userspace process. If enabled, the
@@ -79,10 +79,12 @@ pub(crate) struct Config {
     // This config option is intended to provide some visibility into process
     // credentials checking, e.g., whether elf2tab and tockloader are generating
     // properly formatted footers.
-    pub(crate) debug_process_credentials: bool,
+    pub debug_process_credentials: bool,
+
+    pub is_cheri: bool,
 
     /// Whether or not the MMU requires asynchronous configuration
-    pub(crate) async_mpu_config: bool,
+    pub async_mpu_config: bool,
 }
 
 /// A unique instance of `Config` where compile-time configuration options are
@@ -90,12 +92,13 @@ pub(crate) struct Config {
 /// relevant configuration. Notably, this is the only location in the Tock
 /// kernel where we permit `#[cfg(x)]` to be used to configure code based on
 /// Cargo features.
-pub(crate) const CONFIG: Config = Config {
+pub const CONFIG: Config = Config {
     trace_syscalls: cfg!(feature = "trace_syscalls"),
     debug_load_processes: cfg!(feature = "debug_load_processes"),
     debug_panics: !cfg!(feature = "no_debug_panics"),
     debug_process_credentials: cfg!(feature = "debug_process_credentials"),
-    async_mpu_config: false,
+    is_cheri: cfg!(target_feature = "xcheri"),
+    async_mpu_config: cfg!(target_feature = "xcheri"),
 };
 
 /// Trait allows selecting type based on a const param
@@ -184,20 +187,20 @@ where
 /// also implement that trait.
 macro_rules! proxy_config_trait {
     ($(impl<> $trait : ident {
-        $(fn $f : ident $args : tt $(-> $ret : path)?;)*
+        $(fn $f : ident $(<{$($params : tt)*}>)? ($($args : tt)*) $(-> $ret : path)?;)*
     })*) => {
         $(
             impl<T : $trait, U : $trait> $trait for IfElseCfg<T, U, true> {
                 $(
                     proxy_config_trait_item!(@TRUE $trait,
-                        fn $f $args $(-> $ret)?;
+                        fn $f $(<{$($params)*}>)? ($($args)*) $(-> $ret)?;
                     );
                 )*
             }
             impl<T : $trait, U : $trait> $trait for IfElseCfg<T, U, false> {
                 $(
                     proxy_config_trait_item!(@FALSE $trait,
-                        fn $f $args $(-> $ret)?;
+                        fn $f $(<{$($params)*}>)? ($($args)*) $(-> $ret)?;
                     );
                 )*
             }
@@ -211,43 +214,44 @@ macro_rules! proxy_config_trait {
 ///     &mut self methods
 macro_rules! proxy_config_trait_item {
     // Constructors
-    (@TRUE $trait : ident, fn $con : ident($($v : ident: $t : ty $(| $unwrap : ident)?),*) -> $ret : path;) => {
-        fn $con($($v: $t),*) -> Self {
+    (@TRUE $trait : ident, fn $con : ident $(<{$($params : tt)*}>)? ($($v : ident: $t : ty $(| $unwrap : ident)?),*) -> $ret : path;) => {
+        fn $con$(<$($params)*>)?($($v: $t),*) -> Self {
             Self::new_true($trait::$con($( $v $(.$unwrap())?  ),*))
         }
     };
-    (@FALSE $trait : ident, fn $con : ident($($v : ident: $t : ty $(| $unwrap : ident)?),*) -> $ret : path;) => {
-        fn $con($($v: $t),*) -> Self {
+    (@FALSE $trait : ident, fn $con : ident $(<{$($params : tt)*}>)? ($($v : ident: $t : ty $(| $unwrap : ident)?),*) -> $ret : path;) => {
+        fn $con$(<$($params)*>)?($($v: $t),*) -> Self {
             Self::new_false($trait::$con($($v $(.$unwrap())?),*))
         }
     };
     // &self
-    (@TRUE $trait : ident, fn $method : ident(&self $(,$v : ident: $t : ty $(| $unwrap : ident)?)*) $(-> $ret : path)?;) => {
-        fn $method(&self, $($v: $t),*) $(-> $ret)? {
+    (@TRUE $trait : ident, fn $method : ident $(<{$($params : tt)*}>)? (&self $(,$v : ident: $t : ty $(| $unwrap : ident)?)*) $(-> $ret : path)?;) => {
+        fn $method$(<$($params)*>)?(&self, $($v: $t),*) $(-> $ret)? {
             $trait::$method(self.get_true_ref() $(, $v $(.$unwrap())?)*)
         }
     };
     // &self
-    (@FALSE $trait : ident, fn $method : ident(&self $(,$v : ident: $t : ty $(| $unwrap : ident)?)*) $(-> $ret : path)?;) => {
-        fn $method(&self, $($v: $t),*) $(-> $ret)? {
+    (@FALSE $trait : ident, fn $method : ident $(<{$($params : tt)*}>)? (&self $(,$v : ident: $t : ty $(| $unwrap : ident)?)*) $(-> $ret : path)?;) => {
+        fn $method$(<$($params)*>)?(&self, $($v: $t),*) $(-> $ret)? {
             $trait::$method(self.get_false_ref() $(, $v $(.$unwrap())?)*)
         }
     };
     // &mut self
-    (@TRUE $trait : ident, fn $method : ident(&mut self $(,$v : ident: $t : ty $(| $unwrap : ident)?)*) $(-> $ret : path)?;) => {
-        fn $method(&self, $($v: $t),*) $(-> $ret)? {
+    (@TRUE $trait : ident, fn $method : ident $(<{$($params : tt)*}>)? (&mut self $(,$v : ident: $t : ty $(| $unwrap : ident)?)*) $(-> $ret : path)?;) => {
+        fn $method$(<$($params)*>)?(&self, $($v: $t),*) $(-> $ret)? {
             $trait::$method(self.get_true_mut() $(, $v $(.$unwrap())?)*)
         }
     };
     // &mut self
-    (@FALSE $trait : ident, fn $method : ident(&mut self $(,$v : ident: $t : ty $(| $unwrap : ident)?)*) $(-> $ret : path)?;) => {
-        fn $method(&self, $($v: $t),*) $(-> $ret)? {
+    (@FALSE $trait : ident, fn $method : ident $(<{$($params : tt)*}>)? (&mut self $(,$v : ident: $t : ty $(| $unwrap : ident)?)*) $(-> $ret : path)?;) => {
+        fn $method$(<$($params)*>)?(&self, $($v: $t),*) $(-> $ret)? {
             $trait::$method(self.get_false_mut() $(, $v $(.$unwrap())?)*)
         }
     };
 }
 
 use core::fmt::{Debug, Display, LowerHex, UpperHex};
+use core::hash::{Hash, Hasher};
 
 proxy_config_trait!(
     impl<> Default {
@@ -279,11 +283,24 @@ proxy_config_trait!(
     impl<> Ord {
         fn cmp(&self, other: &Self | unwrap_ref) -> core::cmp::Ordering;
     }
+    impl<> Hash {
+        fn hash<{H: Hasher}> (&self, state: &mut H);
+    }
 );
 
 pub enum CfgConsumed<T, U> {
     True(T),
     False(U),
+}
+
+pub enum CfgMatch<'a, T: 'a, U: 'a> {
+    True(&'a T),
+    False(&'a U),
+}
+
+pub enum CfgMatchMut<'a, T: 'a, U: 'a> {
+    True(&'a mut T),
+    False(&'a mut U),
 }
 
 impl<T, U, const COND: bool> IfElseCfg<T, U, COND>
@@ -312,6 +329,22 @@ impl<T, U> IfElseCfg<T, U, true> {
     pub const fn new_false(_value: U) -> Self {
         panic!()
     }
+    pub const fn new(value_true: T, _value_false: U) -> Self
+    where
+        T: Copy,
+        U: Copy,
+    {
+        Self(value_true)
+    }
+
+    pub fn get_match(&self) -> CfgMatch<T, U> {
+        CfgMatch::True(&self.0)
+    }
+
+    pub fn get_match_mut(&mut self) -> CfgMatchMut<T, U> {
+        CfgMatchMut::True(&mut self.0)
+    }
+
     pub fn map_ref<R, FT, FF>(&self, true_f: FT, _false_f: FF) -> R
     where
         FT: FnOnce(&T) -> R,
@@ -367,6 +400,22 @@ impl<T, U> IfElseCfg<T, U, false> {
     pub const fn new_false(value: U) -> Self {
         Self(value)
     }
+    pub const fn new(_value_true: T, value_false: U) -> Self
+    where
+        T: Copy,
+        U: Copy,
+    {
+        Self(value_false)
+    }
+
+    pub fn get_match(&self) -> CfgMatch<T, U> {
+        CfgMatch::False(&self.0)
+    }
+
+    pub fn get_match_mut(&mut self) -> CfgMatchMut<T, U> {
+        CfgMatchMut::False(&mut self.0)
+    }
+
     pub fn map_ref<R, FT, FF>(&self, _true_f: FT, false_f: FF) -> R
     where
         FT: FnOnce(&T) -> R,

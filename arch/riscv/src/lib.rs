@@ -6,7 +6,19 @@
 
 #![crate_name = "riscv"]
 #![crate_type = "rlib"]
-#![feature(asm_const)] // Can be added to CHERI only with https://github.com/tock/tock/pull/4150
+#![cfg_attr(
+    all(target_feature = "xcheri", feature = "use_static_init"),
+    feature(naked_functions, split_array),
+    feature(const_trait_impl, const_mut_refs, const_slice_split_at_mut),
+    feature(const_type_id),
+    feature(const_default_impls),
+    feature(macro_metavar_expr)
+)]
+#![cfg_attr(
+    target_feature = "xcheri",
+    feature(nonzero_min_max),
+    feature(asm_const)
+)]
 #![recursion_limit = "256"]
 #![no_std]
 
@@ -476,7 +488,7 @@ pub unsafe fn print_mcause(mcval: csr::mcause::Trap, writer: &mut dyn Write) {
             csr::mcause::Interrupt::MachineExternal => {
                 let _ = writer.write_fmt(format_args!("Machine external interrupt"));
             }
-            csr::mcause::Interrupt::Unknown => {
+            csr::mcause::Interrupt::Unknown(_) => {
                 let _ = writer.write_fmt(format_args!("Reserved/Unknown"));
             }
         },
