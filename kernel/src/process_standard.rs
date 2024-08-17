@@ -14,8 +14,8 @@ use core::num::NonZeroU32;
 use core::ptr::NonNull;
 use core::{mem, ptr, slice, str};
 
-use crate::collections::queue::Queue;
-use crate::collections::ring_buffer::RingBuffer;
+use crate::collections::ring_buffer::StaticSizedRingBuffer;
+use crate::config::CONFIG;
 use crate::debug;
 use crate::errorcode::ErrorCode;
 use crate::grant::try_free_grant;
@@ -486,7 +486,7 @@ pub struct ProcessStandard<'a, C: 'static + Chip, D: 'static + ProcessStandardDe
 
     /// Essentially a list of upcalls that want to call functions in the
     /// process.
-    tasks: MapCell<RingBuffer<'a, Task>>,
+    tasks: StaticSizedRingBuffer<Task, CALLBACK_LEN>,
 
     /// Count of how many times this process has entered the fault condition and
     /// been restarted. This is used by some `ProcessRestartPolicy`s to
@@ -535,19 +535,7 @@ impl<C: Chip, D: 'static + ProcessStandardDebug> Process for ProcessStandard<'_,
             return Err(ErrorCode::NODEVICE);
         }
 
-        let ret = self.tasks.map_or(Err(ErrorCode::FAIL), |tasks| {
-            match tasks.enqueue(task) {
-                true => {
-                    // The task has been successfully enqueued.
-                    Ok(())
-                }
-                false => {
-                    // The task could not be enqueued as there is
-                    // insufficient space in the ring buffer.
-                    Err(ErrorCode::NOMEM)
-                }
-            }
-        });
+        let ret = self.tasks.enqueue(task).map_err(|_| ErrorCode::NOMEM);
 
         if ret.is_err() {
             // On any error we were unable to enqueue the task. Record the
@@ -558,35 +546,47 @@ impl<C: Chip, D: 'static + ProcessStandardDebug> Process for ProcessStandard<'_,
         ret
     }
 
+    fn could_enqueue_task(&self) -> Result<(), ErrorCode> {
+        if !self.is_running() {
+            return Err(ErrorCode::NODEVICE);
+        }
+        if self.tasks.is_full() {
+            Err(ErrorCode::NOMEM)
+        } else {
+            Ok(())
+        }
+    }
+
     fn ready(&self) -> bool {
-        self.tasks.map_or(false, |ring_buf| ring_buf.has_elements())
-            || self.state.get() == State::Running
+        self.tasks.has_elements() || self.state.get() == State::Running
     }
 
     fn remove_pending_upcalls(&self, upcall_id: UpcallId) -> usize {
-        self.tasks.map_or(0, |tasks| {
-            let count_before = tasks.len();
-            tasks.retain(|task| match task {
-                // Remove only tasks that are function calls with an id equal
-                // to `upcall_id`.
-                Task::FunctionCall(function_call) => match function_call.source {
-                    FunctionCallSource::Kernel => true,
-                    FunctionCallSource::Driver(id) => id != upcall_id,
-                },
-                _ => true,
-            });
-            let count_after = tasks.len();
-            if config::CONFIG.trace_syscalls {
-                debug!(
-                    "[{:?}] remove_pending_upcalls[{:#x}:{}] = {} upcall(s) removed",
-                    self.processid(),
-                    upcall_id.driver_num,
-                    upcall_id.subscribe_num,
-                    count_before - count_after,
-                );
-            }
-            count_after - count_before
-        })
+        let count_before = self.tasks.len();
+
+        self.tasks.retain_copy(|task| match task {
+            // Remove only tasks that are function calls with an id equal
+            // to `upcall_id`.
+            Task::FunctionCall(function_call) => match function_call.source {
+                FunctionCallSource::Kernel => true,
+                FunctionCallSource::Driver(id) => id != upcall_id,
+            },
+            _ => true,
+        });
+
+        let count_after = self.tasks.len();
+
+        if config::CONFIG.trace_syscalls {
+            debug!(
+                "[{:?}] remove_pending_upcalls[{:#x}:{}] = {} upcall(s) removed",
+                self.processid(),
+                upcall_id.driver_num,
+                upcall_id.subscribe_num,
+                count_before - count_after,
+            );
+        }
+
+        count_after - count_before
     }
 
     fn is_running(&self) -> bool {
@@ -726,9 +726,7 @@ impl<C: Chip, D: 'static + ProcessStandardDebug> Process for ProcessStandard<'_,
         }
 
         // And remove those tasks
-        self.tasks.map(|tasks| {
-            tasks.empty();
-        });
+        self.tasks.empty();
 
         // Clear any grant regions this app has setup with any capsules.
         unsafe {
@@ -747,28 +745,26 @@ impl<C: Chip, D: 'static + ProcessStandardDebug> Process for ProcessStandard<'_,
     }
 
     fn has_tasks(&self) -> bool {
-        self.tasks.map_or(false, |tasks| tasks.has_elements())
+        self.tasks.has_elements()
     }
 
     fn dequeue_task(&self) -> Option<Task> {
-        self.tasks.map_or(None, |tasks| tasks.dequeue())
+        self.tasks.dequeue().ok()
     }
 
     fn remove_upcall(&self, upcall_id: UpcallId) -> Option<Task> {
-        self.tasks.map_or(None, |tasks| {
-            tasks.remove_first_matching(|task| match task {
-                Task::FunctionCall(fc) => match fc.source {
-                    FunctionCallSource::Driver(upid) => upid == upcall_id,
-                    _ => false,
-                },
-                Task::ReturnValue(rv) => rv.upcall_id == upcall_id,
-                Task::IPC(_) => false,
-            })
+        self.tasks.remove_first_matching_copy(|task| match task {
+            Task::FunctionCall(fc) => match fc.source {
+                FunctionCallSource::Driver(upid) => upid == upcall_id,
+                _ => false,
+            },
+            Task::ReturnValue(rv) => rv.upcall_id == upcall_id,
+            Task::IPC(_) => false,
         })
     }
 
     fn pending_tasks(&self) -> usize {
-        self.tasks.map_or(0, |tasks| tasks.len())
+        self.tasks.len() as usize
     }
 
     fn get_command_permissions(&self, driver_num: usize, offset: usize) -> CommandPermissions {
@@ -1576,11 +1572,10 @@ impl<C: Chip, D: 'static + ProcessStandardDebug> Process for ProcessStandard<'_,
     }
 }
 
-impl<C: 'static + Chip, D: 'static + ProcessStandardDebug> ProcessStandard<'_, C, D> {
-    // Memory offset for upcall ring buffer (10 element length).
-    const CALLBACK_LEN: usize = 10;
-    const CALLBACKS_OFFSET: usize = mem::size_of::<Task>() * Self::CALLBACK_LEN;
+// Power two sizes are preferable
+const CALLBACK_LEN: usize = 8;
 
+impl<C: 'static + Chip, D: 'static + ProcessStandardDebug> ProcessStandard<'_, C, D> {
     // Memory offset to make room for this process's metadata.
     const PROCESS_STRUCT_OFFSET: usize = mem::size_of::<ProcessStandard<C, D>>();
 
@@ -1969,7 +1964,7 @@ impl<C: 'static + Chip, D: 'static + ProcessStandardDebug> ProcessStandard<'_, C
             Cell::new(MPURegionState::Free),
             Cell::new(MPURegionState::Free),
         ];
-        process.tasks = MapCell::new(tasks);
+        process.tasks = StaticSizedRingBuffer::new_uninit();
 
         process.debug = D::default();
         if let Some(fix_addr_flash) = fixed_address_flash {
@@ -2119,7 +2114,7 @@ impl<C: 'static + Chip, D: 'static + ProcessStandardDebug> ProcessStandard<'_, C
         let grant_ptrs_offset = grant_ptrs_num * grant_ptr_size;
 
         let initial_kernel_memory_size =
-            grant_ptrs_offset + Self::CALLBACKS_OFFSET + Self::PROCESS_STRUCT_OFFSET;
+            grant_ptrs_offset + Self::PROCESS_STRUCT_OFFSET;
 
         let app_mpu_mem = self.chip.mpu().allocate_app_memory_region(
             self.mem_start(),
@@ -2206,11 +2201,12 @@ impl<C: 'static + Chip, D: 'static + ProcessStandardDebug> ProcessStandard<'_, C
             )
         };
 
-        self.enqueue_task(Task::FunctionCall(FunctionCall {
+        // Enqueue the initial function.
+        self.tasks.enqueue(Task::FunctionCall(FunctionCall {
             source: FunctionCallSource::Kernel,
             pc: init_fn,
-            argument0: app_start,
-            argument1: self.memory_start as usize,
+            argument0: flash_app_start,
+            argument1: self.mem_start() as usize,
             argument2: self.memory_len,
             argument3: (self.app_break.get() as usize).into(),
         }))
