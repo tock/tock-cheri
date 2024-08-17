@@ -26,7 +26,8 @@
 
 use core::cell::Cell;
 use core::marker::PhantomData;
-use core::ops::{Deref, Index, Range, RangeFrom, RangeTo};
+use core::ops::{Deref, DerefMut, Index, IndexMut, Range, RangeFrom, RangeTo};
+use core::ptr::NonNull;
 
 use crate::capabilities;
 use crate::process::{self, ProcessId};
@@ -881,6 +882,20 @@ impl ReadableProcessSlice {
         if self.copy_to_slice_or_err(dest).is_err() {
             len_mismatch_fail(dest.len(), self.len());
         }
+    }
+
+    /// DO. NOT. CALL. THIS.
+    /// TODO: remove this. b/290209039
+    /// This is technically unsound. It is currently only used by the dynamic process loader.
+    /// One solution might be to refactor the process loading logic to take a ReadableProcessSlice
+    /// as the conversion the other way is safe.
+    /// For now, this suffices. All the kernel will do with the slice is copy it for program
+    /// initialisation. It is doing so in a single syscall so the contents of the buffer actually
+    /// ARE stable (DMA aside).
+    /// This is being marked as safe only so I don't have to introduce a capability just to remove
+    /// it again when I have refactored.
+    pub fn to_byte_slice(&self) -> &[u8] {
+        unsafe { core::mem::transmute(self) }
     }
 
     /// Copy the contents of a [`ReadableProcessSlice`] into a mutable

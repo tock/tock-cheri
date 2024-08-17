@@ -8,6 +8,7 @@ pub mod binary_write;
 pub mod copy_slice;
 pub mod helpers;
 pub mod leasable_buffer;
+pub mod leased_buffer;
 pub mod math;
 pub mod mut_imut_buffer;
 pub mod peripheral_management;

@@ -345,6 +345,10 @@ pub trait Process {
     /// run without credentials, return `None`.
     fn get_credential(&self) -> Option<AcceptedCredential>;
 
+    /// Performs the checks for enqueue_task and returns errors in the same cases,
+    /// or otherwise does nothing and returns unit.
+    fn could_enqueue_task(&self) -> Result<(), ErrorCode>;
+
     /// Returns how many times this process has been restarted.
     fn get_restart_count(&self) -> usize;
 
@@ -797,6 +801,10 @@ pub trait Process {
     fn is_valid_upcall_function_pointer(&self, upcall_fn: *const ()) -> bool;
 
     // functions for processes that are architecture specific
+
+    /// Get extra arguments for commands. The value returned is indeterminate if
+    /// this is not called in the context of a driver handling a command.
+    fn get_extra_syscall_arg(&self, ndx: usize) -> Option<usize>;
 
     /// Set the return value the process should see when it begins executing
     /// again after the syscall.

@@ -438,7 +438,7 @@ impl Kernel {
     pub fn process_each_capability<F>(
         &'static self,
         _capability: &dyn capabilities::ProcessManagementCapability,
-        mut closure: F,
+        closure: F,
     ) where
         F: FnMut(&dyn process::Process),
     {
@@ -777,7 +777,7 @@ impl Kernel {
                     scheduler_timer.arm();
                     let context_switch_reason = process.switch_to();
                     scheduler_timer.disarm();
-                    chip.mpu().disable_app_mpu();
+                    process.disable_mmu();
 
                     // Now the process has returned back to the kernel. Check
                     // why and handle the process as appropriate.

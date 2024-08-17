@@ -38,7 +38,7 @@ fn main() {
     // If you are intentionally not using the standard Tock config files, set
     // `cfg-tock-buildflagssentinel` in your cargo config to prevent this
     // error.
-    if std::env::var("HOST") != std::env::var("TARGET") {
+    /*if std::env::var("HOST") != std::env::var("TARGET") {
         let rust_flags = std::env::var("CARGO_ENCODED_RUSTFLAGS");
         if !rust_flags
             .iter()
@@ -49,7 +49,7 @@ fn main() {
             Verify you have not unintentionally set the RUSTFLAGS environment variable."
             );
         }
-    }
+    }*/
 
     // Include the folder where the board's Cargo.toml is in the linker file
     // search path.

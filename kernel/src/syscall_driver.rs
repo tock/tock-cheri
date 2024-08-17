@@ -80,6 +80,18 @@ impl CommandReturn {
     }
 }
 
+/// A type to more conveniently propagate errors with the "?" operator
+pub type CommandReturnResult = Result<CommandReturn, ErrorCode>;
+
+impl From<CommandReturnResult> for CommandReturn {
+    fn from(res: CommandReturnResult) -> Self {
+        match res {
+            Ok(command) => command,
+            Err(code) => CommandReturn::failure(code),
+        }
+    }
+}
+
 impl From<Result<(), ErrorCode>> for CommandReturn {
     fn from(rc: Result<(), ErrorCode>) -> Self {
         match rc {

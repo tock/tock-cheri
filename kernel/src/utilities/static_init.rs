@@ -23,7 +23,7 @@
 #[macro_export]
 macro_rules! static_init {
     ($T:ty, $e:expr $(,)?) => {{
-        let mut buf = $crate::static_buf!($T);
+        let buf = $crate::static_buf!($T);
         buf.write($e)
     }};
 }

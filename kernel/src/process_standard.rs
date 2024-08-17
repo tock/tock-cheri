@@ -1055,6 +1055,20 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
         self.completion_code.get()
     }
 
+    fn get_extra_syscall_arg(&self, ndx: usize) -> Option<usize> {
+        self.stored_state
+            .map(|stored_state| unsafe {
+                // SAFETY: these are the correct bounds for the app
+                self.chip.userspace_kernel_boundary().get_extra_syscall_arg(
+                    ndx,
+                    self.mem_start(),
+                    self.app_break.get(),
+                    stored_state,
+                )
+            })
+            .flatten()
+    }
+
     fn set_syscall_return_value(&self, return_value: SyscallReturn) {
         match self.stored_state.map(|stored_state| unsafe {
             // Actually set the return value for a particular process.
@@ -1241,7 +1255,7 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
         ProcessSizes {
             grant_pointers: mem::size_of::<GrantPointerEntry>()
                 * self.kernel.get_grant_count_and_finalize(),
-            upcall_list: Self::CALLBACKS_OFFSET,
+            upcall_list: 0,
             process_control_block: Self::PROCESS_STRUCT_OFFSET,
         }
     }

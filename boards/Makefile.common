@@ -58,7 +58,7 @@ PLATFORM := $(firstword $(shell $(CARGO) tree))
 # Set `TARGET` if not already defined. Note: this only works on nightly.
 ifeq ($(TARGET),)
   # Get the specified target using the unstable `cargo config get` command.
-  TARGET_QUOTES := $(shell $(CARGO) config get --format json-value build.target)
+  TARGET_QUOTES := $(shell $(CARGO) -Z unstable-options config get --format json-value build.target)
   # Remove the quotes from around the target name.
   TARGET := $(patsubst "%",%,$(TARGET_QUOTES))
 endif
@@ -189,7 +189,6 @@ endif
 
 # Dump configuration for verbose builds
 ifeq ($(VERBOSE_MODE),1)
-RUST_FLAGS = $(shell $(CARGO) -Zunstable-options config get build.rustflags --format json-value 2> /dev/null || echo "Listing Rust flags only accessible on nightly cargo")
   $(info )
   $(info *******************************************************)
   $(info TOCK KERNEL BUILD SYSTEM -- VERBOSE BUILD CONFIGURATION)
@@ -201,7 +200,7 @@ RUST_FLAGS = $(shell $(CARGO) -Zunstable-options config get build.rustflags --fo
   $(info PLATFORM                      = $(PLATFORM))
   $(info TARGET                        = $(TARGET))
   $(info TOCK_KERNEL_VERSION           = $(TOCK_KERNEL_VERSION))
-  $(info RUSTFLAGS                     = $(RUST_FLAGS))
+  $(info RUSTFLAGS                     = $(RUSTC_FLAGS_TOCK))
   $(info MAKEFLAGS                     = $(MAKEFLAGS))
   $(info OBJDUMP_FLAGS                 = $(OBJDUMP_FLAGS))
   $(info OBJCOPY_FLAGS                 = $(OBJCOPY_FLAGS))
@@ -299,10 +298,10 @@ $(TOCK_ROOT_DIRECTORY)tools/sha256sum/target/debug/sha256sum:
 
 .PHONY: $(TARGET_PATH)/release/$(PLATFORM)
 $(TARGET_PATH)/release/$(PLATFORM):
-	$(Q)$(CARGO) rustc $(VERBOSE_FLAGS) --bin $(PLATFORM) --release
+	$(Q)RUSTFLAGS="$(RUSTC_FLAGS_TOCK)" $(CARGO) rustc  $(CARGO_FLAGS_TOCK) --bin $(PLATFORM) --release -- $(RUSTC_FLAGS_FOR_BIN)
 	$(Q)$(SIZE) $(SIZE_FLAGS) $@
 
 .PHONY: $(TARGET_PATH)/debug/$(PLATFORM)
 $(TARGET_PATH)/debug/$(PLATFORM):
-	$(Q)$(CARGO) build $(VERBOSE_FLAGS) --bin $(PLATFORM)
+	$(Q)RUSTFLAGS="$(RUSTC_FLAGS_TOCK)" $(CARGO) rustc  $(CARGO_FLAGS_TOCK) --bin $(PLATFORM) -- $(RUSTC_FLAGS_FOR_BIN)
 	$(Q)$(SIZE) $(SIZE_FLAGS) $@
