@@ -411,7 +411,7 @@ impl uart::ReceiveClient for UartDevice<'_> {
 }
 
 impl<'a> ListNode<'a, UartDevice<'a>> for UartDevice<'a> {
-    fn next(&'a self) -> &'a ListLink<'a, UartDevice<'a>> {
+    fn next(&self) -> &ListLink<'a, UartDevice<'a>> {
         &self.next
     }
 }

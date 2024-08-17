@@ -650,7 +650,7 @@ pub struct RxState<'a> {
 }
 
 impl<'a> ListNode<'a, RxState<'a>> for RxState<'a> {
-    fn next(&'a self) -> &'a ListLink<'a, RxState<'a>> {
+    fn next(&self) -> &ListLink<'a, RxState<'a>> {
         &self.next
     }
 }

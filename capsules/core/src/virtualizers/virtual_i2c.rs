@@ -243,7 +243,7 @@ impl<'a, I: i2c::I2CMaster<'a>, S: i2c::SMBusMaster<'a>> I2CClient for I2CDevice
 impl<'a, I: i2c::I2CMaster<'a>, S: i2c::SMBusMaster<'a>> ListNode<'a, I2CDevice<'a, I, S>>
     for I2CDevice<'a, I, S>
 {
-    fn next(&'a self) -> &'a ListLink<'a, I2CDevice<'a, I, S>> {
+    fn next(&self) -> &ListLink<'a, I2CDevice<'a, I, S>> {
         &self.next
     }
 }
@@ -350,7 +350,7 @@ impl<'a, I: i2c::I2CMaster<'a>, S: i2c::SMBusMaster<'a>> I2CClient for SMBusDevi
 impl<'a, I: i2c::I2CMaster<'a>, S: i2c::SMBusMaster<'a>> ListNode<'a, SMBusDevice<'a, I, S>>
     for SMBusDevice<'a, I, S>
 {
-    fn next(&'a self) -> &'a ListLink<'a, SMBusDevice<'a, I, S>> {
+    fn next(&self) -> &ListLink<'a, SMBusDevice<'a, I, S>> {
         &self.next
     }
 }

@@ -206,7 +206,7 @@ impl<F: hil::flash::Flash> hil::flash::Client<F> for FlashUser<'_, F> {
 }
 
 impl<'a, F: hil::flash::Flash> ListNode<'a, FlashUser<'a, F>> for FlashUser<'a, F> {
-    fn next(&'a self) -> &'a ListLink<'a, FlashUser<'a, F>> {
+    fn next(&self) -> &ListLink<'a, FlashUser<'a, F>> {
         &self.next
     }
 }

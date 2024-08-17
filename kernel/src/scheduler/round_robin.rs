@@ -46,7 +46,7 @@ impl<'a> RoundRobinProcessNode<'a> {
 }
 
 impl<'a> ListNode<'a, RoundRobinProcessNode<'a>> for RoundRobinProcessNode<'a> {
-    fn next(&'a self) -> &'a ListLink<'a, RoundRobinProcessNode<'a>> {
+    fn next(&self) -> &ListLink<'a, RoundRobinProcessNode<'a>> {
         &self.next
     }
 }
