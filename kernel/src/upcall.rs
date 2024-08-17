@@ -6,6 +6,7 @@
 
 use crate::config;
 use crate::debug;
+use crate::grant::{DualTracker, Track};
 use crate::process;
 use crate::process::ProcessId;
 use crate::syscall::SyscallReturn;
@@ -92,6 +93,62 @@ pub(crate) struct Upcall {
     /// scheduled. An `Upcall` can be null when it is first created,
     /// or after an app unsubscribes from an upcall.
     pub(crate) fn_ptr: CapabilityPtr,
+}
+
+/// A type for calling an upcall in a process to be used by drivers that
+/// wish to store upcalls across syscalls
+#[derive(Copy, Clone)]
+pub struct PUpcall {
+    /// Liveness tracker in case the process dies
+    liveness: DualTracker,
+    /// The application data passed by the app when `subscribe()` was called
+    pub(crate) appdata: MachineRegister,
+    /// A pointer to the first instruction of a function in the app
+    /// associated with app_id.
+    pub(crate) fn_ptr: CapabilityPtr,
+    /// TODO: only really need for logging
+    pub(crate) upcall_id: UpcallId,
+}
+
+impl PUpcall {
+    pub(crate) fn new(
+        liveness: DualTracker,
+        appdata: MachineRegister,
+        fn_ptr: CapabilityPtr,
+        upcall_id: UpcallId,
+    ) -> Self {
+        Self {
+            liveness,
+            appdata,
+            fn_ptr,
+            upcall_id,
+        }
+    }
+
+    pub fn schedule(&self, r0: usize, r1: usize, r2: usize) -> Result<(), UpcallError> {
+        match self.liveness.get_proc() {
+            None => Ok(()),
+            Some(proc) => {
+                let upcall =
+                    Upcall::new(proc.processid(), self.upcall_id, self.appdata, self.fn_ptr);
+                upcall.schedule(proc, r0, r1, r2)
+            }
+        }
+    }
+}
+
+impl Default for PUpcall {
+    fn default() -> Self {
+        Self {
+            liveness: DualTracker::global_dead(),
+            appdata: Default::default(),
+            fn_ptr: Default::default(),
+            upcall_id: UpcallId {
+                driver_num: 0,
+                subscribe_num: 0,
+            },
+        }
+    }
 }
 
 impl Upcall {

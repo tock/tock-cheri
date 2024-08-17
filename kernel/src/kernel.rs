@@ -11,12 +11,10 @@
 use core::cell::Cell;
 use core::num::NonZeroU32;
 
-use crate::capabilities;
-use crate::config;
-use crate::debug;
+use crate::config::CONFIG;
 use crate::deferred_call::DeferredCall;
 use crate::errorcode::ErrorCode;
-use crate::grant::{AllowRoSize, AllowRwSize, Grant, UpcallSize};
+use crate::grant::{AllowRoSize, AllowRwSize, Grant, PLiveTracker, Track, UpcallSize};
 use crate::ipc;
 use crate::memop;
 use crate::platform::chip::Chip;
@@ -1218,7 +1216,7 @@ impl Kernel {
                                             rw_pbuf,
                                         ) {
                                             Ok(rw_pbuf) => {
-                                                let (ptr, len) = rw_pbuf.consume();
+                                                let (ptr, len, _) = rw_pbuf.consume();
                                                 SyscallReturn::AllowReadWriteSuccess(ptr, len)
                                             }
                                             Err((rw_pbuf, err @ ErrorCode::NOMEM)) => {
@@ -1240,13 +1238,13 @@ impl Kernel {
                                                             rw_pbuf,
                                                         ) {
                                                             Ok(rw_pbuf) => {
-                                                                let (ptr, len) = rw_pbuf.consume();
+                                                                let (ptr, len, _) = rw_pbuf.consume();
                                                                 SyscallReturn::AllowReadWriteSuccess(
                                                                     ptr, len,
                                                                 )
                                                             }
                                                             Err((rw_pbuf, err)) => {
-                                                                let (ptr, len) = rw_pbuf.consume();
+                                                                let (ptr, len, _) = rw_pbuf.consume();
                                                                 SyscallReturn::AllowReadWriteFailure(
                                                                     err, ptr, len,
                                                                 )
@@ -1271,7 +1269,7 @@ impl Kernel {
                                                             }
                                                             _ => {}
                                                         }
-                                                        let (ptr, len) = rw_pbuf.consume();
+                                                        let (ptr, len, _) = rw_pbuf.consume();
                                                         SyscallReturn::AllowReadWriteFailure(
                                                             err, ptr, len,
                                                         )
@@ -1279,7 +1277,7 @@ impl Kernel {
                                                 }
                                             }
                                             Err((rw_pbuf, err)) => {
-                                                let (ptr, len) = rw_pbuf.consume();
+                                                let (ptr, len, _) = rw_pbuf.consume();
                                                 SyscallReturn::AllowReadWriteFailure(err, ptr, len)
                                             }
                                         }
@@ -1347,7 +1345,7 @@ impl Kernel {
                                                 // allow operation. Pass the
                                                 // previous buffer information
                                                 // back to the process.
-                                                let (ptr, len) = returned_pbuf.consume();
+                                                let (ptr, len, _) = returned_pbuf.consume();
                                                 SyscallReturn::UserspaceReadableAllowSuccess(
                                                     ptr, len,
                                                 )
@@ -1357,7 +1355,7 @@ impl Kernel {
                                                 // allow operation. Pass the new
                                                 // buffer information back to
                                                 // the process.
-                                                let (ptr, len) = rejected_pbuf.consume();
+                                                let (ptr, len, _) = rejected_pbuf.consume();
                                                 SyscallReturn::UserspaceReadableAllowFailure(
                                                     err, ptr, len,
                                                 )
@@ -1423,7 +1421,7 @@ impl Kernel {
                                             ro_pbuf,
                                         ) {
                                             Ok(ro_pbuf) => {
-                                                let (ptr, len) = ro_pbuf.consume();
+                                                let (ptr, len, _) = ro_pbuf.consume();
                                                 SyscallReturn::AllowReadOnlySuccess(ptr, len)
                                             }
                                             Err((ro_pbuf, err @ ErrorCode::NOMEM)) => {
@@ -1445,13 +1443,13 @@ impl Kernel {
                                                             ro_pbuf,
                                                         ) {
                                                             Ok(ro_pbuf) => {
-                                                                let (ptr, len) = ro_pbuf.consume();
+                                                                let (ptr, len, _) = ro_pbuf.consume();
                                                                 SyscallReturn::AllowReadOnlySuccess(
                                                                     ptr, len,
                                                                 )
                                                             }
                                                             Err((ro_pbuf, err)) => {
-                                                                let (ptr, len) = ro_pbuf.consume();
+                                                                let (ptr, len, _) = ro_pbuf.consume();
                                                                 SyscallReturn::AllowReadOnlyFailure(
                                                                     err, ptr, len,
                                                                 )
@@ -1476,7 +1474,7 @@ impl Kernel {
                                                             }
                                                             _ => {}
                                                         }
-                                                        let (ptr, len) = ro_pbuf.consume();
+                                                        let (ptr, len, _) = ro_pbuf.consume();
                                                         SyscallReturn::AllowReadOnlyFailure(
                                                             err, ptr, len,
                                                         )
@@ -1484,7 +1482,7 @@ impl Kernel {
                                                 }
                                             }
                                             Err((ro_pbuf, err)) => {
-                                                let (ptr, len) = ro_pbuf.consume();
+                                                let (ptr, len, _) = ro_pbuf.consume();
                                                 SyscallReturn::AllowReadOnlyFailure(err, ptr, len)
                                             }
                                         }
