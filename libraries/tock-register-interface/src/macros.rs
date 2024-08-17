@@ -4,15 +4,62 @@
 
 //! Macros for cleanly defining peripheral registers.
 
+use core::mem::ManuallyDrop;
+use core::ops::Deref;
+
+/// Helper to pass through a generic parameter, whether it be a type, lifetime, or constant.
+#[macro_export]
+macro_rules! pass_generic {
+    (const $t : ident : $x : ty) => {
+        $t
+    };
+    ($t : ident) => {
+        $t
+    };
+    ($life : lifetime) => {
+        $life
+    };
+}
+
+/// A wrapper around a T that pads it to (at least, not exactly) N bytes
+pub union PaddedTo<T, const N: usize> {
+    inner: ManuallyDrop<T>,
+    _padding: [u8; N],
+}
+
+impl<T, const N: usize> PaddedTo<T, N> {
+    pub fn new(inner: T) -> Self {
+        Self {
+            inner: ManuallyDrop::new(inner),
+        }
+    }
+}
+
+impl<T, const N: usize> Deref for PaddedTo<T, N> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        // Safety: this is the only variant we ever construct / allow access to
+        unsafe { &self.inner }
+    }
+}
+
+impl<T, const N: usize> core::ops::DerefMut for PaddedTo<T, N> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // Safety: this is the only variant we ever construct / allow access to
+        unsafe { &mut self.inner }
+    }
+}
+
 #[macro_export]
 macro_rules! register_fields {
     // Macro entry point.
-    (@root $(#[$attr_struct:meta])* $vis_struct:vis $name:ident $(<$life:lifetime>)? { $($input:tt)* } ) => {
+    (@root $(#[$attr_struct:meta])* $vis_struct:vis $name:ident $(<$($($idents : ident)* $($life : lifetime)? $(: $T: tt) ?),+>)? { $($input:tt)* } ) => {
         $crate::register_fields!(
             @munch (
                 $($input)*
             ) -> {
-                $vis_struct struct $(#[$attr_struct])* $name $(<$life>)?
+                $vis_struct struct $(#[$attr_struct])* $name $(<$($($idents)* $($life)? $(: $T) ?),+>)?
             }
         );
     };
@@ -23,14 +70,15 @@ macro_rules! register_fields {
             $(#[$attr_end:meta])*
             ($offset:expr => @END),
         )
-        -> {$vis_struct:vis struct $(#[$attr_struct:meta])* $name:ident $(<$life:lifetime>)? $(
+        -> {    $vis_struct:vis struct $(#[$attr_struct:meta])* $name:ident $(<$($($idents : ident)* $($life : lifetime)? $(: $T: tt) ?),+>)? $(
                 $(#[$attr:meta])*
                 ($vis:vis $id:ident: $ty:ty)
             )*}
     ) => {
         $(#[$attr_struct])*
         #[repr(C)]
-        $vis_struct struct $name $(<$life>)? {
+        $vis_struct struct $name $(<$($($idents)* $($life)? $(: $T) ?),+>)?
+        {
             $(
                 $(#[$attr])*
                 $vis $id: $ty
@@ -58,6 +106,30 @@ macro_rules! register_fields {
         );
     };
 
+    // Munch field with dynamically calculated size.
+    (@munch
+        (
+            $(#[$attr:meta])*
+            ($offset_start:expr => pad $vis:vis $field:ident: $ty:ty),
+            $(#[$attr_next:meta])*
+            ($offset_end:expr => $($next:tt)*),
+            $($after:tt)*
+        )
+        -> {$($output:tt)*}
+    ) => {
+        $crate::register_fields!(
+            @munch (
+                $(#[$attr_next])*
+                ($offset_end => $($next)*),
+                $($after)*
+            ) -> {
+                $($output)*
+                $(#[$attr])*
+                ($vis $field: $crate::macros::PaddedTo<$ty, {$offset_end - $offset_start}>)
+            }
+        );
+    };
+
     // Munch padding.
     (@munch
         (
@@ -81,6 +153,32 @@ macro_rules! register_fields {
             }
         );
     };
+}
+
+#[macro_export]
+macro_rules! test_constants {
+    // Match cases where are no parameters / defaults
+    (,) => ();
+    ({$($anything : tt)*},) => ();
+    // Match a constant
+    ({{const $name : ident : $t : ty} $($rest1 : tt)* }, {{$default : tt} $($rest2 : tt)*}) =>
+    (
+        const $name : $t = $default;
+        $crate::test_constants!({$($rest1)*}, {$($rest2)*});
+    );
+    // Match a lifetime (outputs nothing)
+    ({{$l : lifetime} $($rest1 : tt)* }, {$($rest2 : tt)*}) =>
+    (
+        $crate::test_constants!({$($rest1)*}, {$($rest2)*});
+    );
+    // Match a type
+    ({{$name : ident : $t : tt} $($rest1 : tt)* }, {{$default : tt} $($rest2 : tt)*}) =>
+    (
+        type $name = $default;
+        $crate::test_constants!({$($rest1)*} {$($rest2)*});
+    );
+    // Finish
+    ({}, {}) => ();
 }
 
 // TODO: All of the rustdoc tests below use a `should_fail` attribute instead of
@@ -181,14 +279,15 @@ macro_rules! test_fields {
     // const-evaluable.
 
     // Macro entry point.
-    (@root $struct:ident $(<$life:lifetime>)? { $($input:tt)* } ) => {
+    (@root $struct:ident $(<$($($idents : ident)* $($life : lifetime)? $(: $T: tt) ?),+>)?  $(test_defaults<$($default : tt),*>)? { $($input:tt)* } ) => {
         // Start recursion at offset 0.
-        $crate::test_fields!(@munch $struct $(<$life>)? ($($input)*) : (0, 0));
+        $crate::test_constants!($({$({$($idents)* $($life)? $(: $T) ?})+})?, $({$({$default})*})?);
+        $crate::test_fields!(@munch $struct $(<$($($idents)* $($life)? $(: $T) ?),+>)? ($($input)*) : (0, 0));
     };
 
     // Consume the ($size:expr => @END) field, which MUST be the last field in
     // the register struct.
-    (@munch $struct:ident $(<$life:lifetime>)?
+    (@munch $struct:ident $(<$($($idents : ident)* $($life : lifetime)? $(: $T: tt) ?),+>)?
         (
             $(#[$attr_end:meta])*
             ($size:expr => @END),
@@ -210,7 +309,7 @@ macro_rules! test_fields {
             // and the claimed end offset MUST be equal.
             assert!(SUM == $size);
 
-            const STRUCT_SIZE: usize = core::mem::size_of::<$struct $(<$life>)?>();
+            const STRUCT_SIZE: usize = core::mem::size_of::<$struct $(<$($crate::pass_generic!($($idents)* $($life)? $(: $T) ?)),+>)?>();
             const ALIGNMENT_CORRECTED_SIZE: usize = if $size % MAX_ALIGN != 0 { $size + (MAX_ALIGN - ($size % MAX_ALIGN)) } else { $size };
 
             assert!(
@@ -227,8 +326,32 @@ macro_rules! test_fields {
         };
     };
 
+    // Consume a proper ($offset:expr => pad $field:ident: $ty:ty) field.
+    (@munch $struct:ident $(<$($($idents : ident)* $($life : lifetime)? $(: $T: tt) ?),+>)?
+        (
+            $(#[$attr:meta])*
+            ($offset_start:expr => pad $vis:vis $field:ident: $ty:ty),
+            $(#[$attr_next:meta])*
+            ($offset_end:expr => $($next:tt)*),
+            $($after:tt)*
+        )
+        : $output:expr
+    ) => {
+        // Just replace the type and then use the non-pad matcher
+        $crate::test_fields!(@munch $struct $(<$($($idents)* $($life)? $(: $T) ?),+>)?
+        (
+            $(#[$attr])*
+            ($offset_start => $vis $field: $crate::macros::PaddedTo<$ty, {$offset_end - $offset_start}>),
+            $(#[$attr_next])*
+            ($offset_end => $($next)*),
+            $($after)*
+        )
+        : $output
+        );
+    };
+
     // Consume a proper ($offset:expr => $field:ident: $ty:ty) field.
-    (@munch $struct:ident $(<$life:lifetime>)?
+    (@munch $struct:ident $(<$($($idents : ident)* $($life : lifetime)? $(: $T: tt) ?),+>)?
         (
             $(#[$attr:meta])*
             ($offset_start:expr => $vis:vis $field:ident: $ty:ty),
@@ -239,7 +362,7 @@ macro_rules! test_fields {
         : $output:expr
     ) => {
         $crate::test_fields!(
-            @munch $struct $(<$life>)? (
+            @munch $struct $(<$($($idents)* $($life)? $(: $T) ?),+>)? (
                 $(#[$attr_next])*
                 ($offset_end => $($next)*),
                 $($after)*
@@ -285,9 +408,8 @@ macro_rules! test_fields {
                     );
                 }
 
-                // Add the current field's length to the offset and validate the
-                // end offset of the field based on the next field's claimed
-                // start offset.
+                // Add the current field's length to the offset. This is validated by the next
+                // iteration (unless the wildcard _ is used).
                 const NEW_SUM: usize = SUM + core::mem::size_of::<$ty>();
                 assert!(
                     NEW_SUM == $offset_end,
@@ -313,7 +435,7 @@ macro_rules! test_fields {
     };
 
     // Consume a padding ($offset:expr => $padding:ident) field.
-    (@munch $struct:ident $(<$life:lifetime>)?
+    (@munch $struct:ident $(<$($($idents : ident)* $($life : lifetime)? $(: $T: tt) ?),+>)?
         (
             $(#[$attr:meta])*
             ($offset_start:expr => $padding:ident),
@@ -324,7 +446,7 @@ macro_rules! test_fields {
         : $output:expr
     ) => {
         $crate::test_fields!(
-            @munch $struct $(<$life>)? (
+            @munch $struct $(<$($($idents)* $($life)? $(: $T) ?),+>)? (
                 $(#[$attr_next])*
                 ($offset_end => $($next)*),
                 $($after)*
@@ -363,12 +485,12 @@ macro_rules! register_structs {
     {
         $(
             $(#[$attr:meta])*
-            $vis_struct:vis $name:ident $(<$life:lifetime>)? {
+            $vis_struct:vis $name:ident$(<$($($idents : ident)* $($life : lifetime)? $(: $T: tt) ? ),+>)?  $(test_defaults<$($default : tt),*>)? {
                 $( $fields:tt )*
             }
         ),*
     } => {
-        $( $crate::register_fields!(@root $(#[$attr])* $vis_struct $name $(<$life>)? { $($fields)* } ); )*
-        $( $crate::test_fields!(@root $name $(<$life>)? { $($fields)* } ); )*
+        $( $crate::register_fields!(@root $(#[$attr])* $vis_struct $name $(<$($($idents)* $($life)? $(: $T) ?),+>)? { $($fields)* } ); )*
+        $( $crate::test_fields!(@root $name $(<$($($idents)* $($life)? $(: $T) ?),+>)?  $(test_defaults<$($default),*>)? { $($fields)* } ); )*
     };
 }
