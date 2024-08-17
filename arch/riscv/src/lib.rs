@@ -6,6 +6,7 @@
 
 #![crate_name = "riscv"]
 #![crate_type = "rlib"]
+#![cfg_attr(target_feature = "xcheri", feature(nonzero_min_max))]
 #![feature(asm_const)] // Can be added to CHERI only with https://github.com/tock/tock/pull/4150
 #![recursion_limit = "256"]
 #![no_std]

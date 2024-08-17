@@ -7,13 +7,19 @@
 use core::fmt::{Formatter, LowerHex, UpperHex};
 use core::ops::AddAssign;
 
+use crate::cheri::{cheri_perms, cptr, CPtrOps};
+use crate::config::CONFIG;
+use crate::TIfCfg;
+
+type InnerType = TIfCfg!(is_cheri, cptr, usize);
+
 /// A pointer with target specific metadata.
 /// This should be used any time the kernel wishes to grant authority to the user, or any time
 /// the user should be required to prove validity of a pointer.
-#[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct MetaPtr {
-    ptr: usize,
+    ptr: InnerType,
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -28,14 +34,16 @@ pub enum MetaPermissions {
 impl From<MetaPtr> for usize {
     #[inline]
     fn from(from: MetaPtr) -> Self {
-        from.ptr
+        from.ptr.cfg_into()
     }
 }
 
 impl From<usize> for MetaPtr {
     #[inline]
     fn from(from: usize) -> Self {
-        Self { ptr: from }
+        Self {
+            ptr: InnerType::cfg_from(from),
+        }
     }
 }
 
@@ -56,13 +64,31 @@ impl LowerHex for MetaPtr {
 impl AddAssign<usize> for MetaPtr {
     #[inline]
     fn add_assign(&mut self, rhs: usize) {
-        self.ptr.add_assign(rhs)
+        self.ptr.map_mut(
+            |cheri| cheri.add_assign(rhs),
+            |non_cheri| non_cheri.add_assign(rhs),
+        );
     }
 }
 
 impl MetaPtr {
+    #[inline]
+    pub fn cheri_perms_for(perms: MetaPermissions) -> usize {
+        match perms {
+            MetaPermissions::Any => 0,
+            MetaPermissions::Read => cheri_perms::DEFAULT_R,
+            MetaPermissions::Write => cheri_perms::STORE,
+            MetaPermissions::ReadWrite => cheri_perms::DEFAULT_RW,
+            MetaPermissions::Execute => cheri_perms::EXECUTE,
+        }
+    }
+
+    #[inline]
     pub fn as_ptr(&self) -> *const () {
-        self.ptr as *const ()
+        self.ptr.map_ref(
+            |cheri| cheri.as_ptr(),
+            |non_cheri| (*non_cheri) as *const (),
+        )
     }
 
     /// Convert to a raw pointer, checking that metadata allows a particular set of permissions over
@@ -70,18 +96,38 @@ impl MetaPtr {
     /// If the metadata does not allow for this, returns null.
     /// If no such metadata exists, this succeeds.
     #[inline]
-    pub fn as_ptr_checked(&self, _length: usize, _perms: MetaPermissions) -> *const () {
-        self.ptr as *const ()
+    pub fn as_ptr_checked(&self, length: usize, perms: MetaPermissions) -> *const () {
+        self.ptr.map_ref(
+            |cheri| cheri.as_ptr_checked(length, Self::cheri_perms_for(perms)),
+            |non_cheri| (*non_cheri) as *const (),
+        )
     }
 
     #[inline]
     pub fn new_with_metadata(
         ptr: *const (),
-        _base: usize,
-        _length: usize,
-        _perms: MetaPermissions,
+        base: usize,
+        length: usize,
+        perms: MetaPermissions,
     ) -> Self {
-        Self { ptr: ptr as usize }
+        Self {
+            ptr: if CONFIG.is_cheri {
+                let mut result = cptr::default();
+                if perms == MetaPermissions::Execute {
+                    result.set_addr_from_pcc_restricted(ptr as usize, base, length);
+                } else {
+                    result.set_addr_from_ddc_restricted(
+                        ptr as usize,
+                        base,
+                        length,
+                        Self::cheri_perms_for(perms),
+                    );
+                }
+                InnerType::new_true(result)
+            } else {
+                InnerType::new_false(ptr as usize)
+            },
+        }
     }
 
     #[inline]
@@ -89,7 +135,9 @@ impl MetaPtr {
     where
         F: FnOnce(&Self) -> U,
     {
-        if self.ptr == 0usize {
+        let addr: usize = (*self).into();
+
+        if addr == 0 {
             default
         } else {
             f(self)

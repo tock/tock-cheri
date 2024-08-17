@@ -81,6 +81,8 @@ pub(crate) struct Config {
     // properly formatted footers.
     pub(crate) debug_process_credentials: bool,
 
+    pub(crate) is_cheri: bool,
+
     /// Whether or not the MMU requires asynchronous configuration
     pub(crate) async_mpu_config: bool,
 }
@@ -95,7 +97,8 @@ pub(crate) const CONFIG: Config = Config {
     debug_load_processes: cfg!(feature = "debug_load_processes"),
     debug_panics: !cfg!(feature = "no_debug_panics"),
     debug_process_credentials: cfg!(feature = "debug_process_credentials"),
-    async_mpu_config: false,
+    is_cheri: cfg!(target_feature = "xcheri"),
+    async_mpu_config: cfg!(target_feature = "xcheri"),
 };
 
 /// Trait allows selecting type based on a const param

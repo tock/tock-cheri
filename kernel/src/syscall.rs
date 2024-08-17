@@ -561,10 +561,10 @@ impl SyscallReturn {
             // "as" in order to satisfy the compiler. But I expect this function will disappear
             // in favour of just using the usize one.
             unsafe {
-                let a0 = &mut *(core::ptr::from_mut(a0) as *mut MetaPtr);
-                let a1 = &mut *(core::ptr::from_mut(a1) as *mut MetaPtr);
-                let a2 = &mut *(core::ptr::from_mut(a2) as *mut MetaPtr);
-                let a3 = &mut *(core::ptr::from_mut(a3) as *mut MetaPtr);
+                let a0 = &mut *(crate::polyfill::core::ptr::from_mut(a0) as *mut MetaPtr);
+                let a1 = &mut *(crate::polyfill::core::ptr::from_mut(a1) as *mut MetaPtr);
+                let a2 = &mut *(crate::polyfill::core::ptr::from_mut(a2) as *mut MetaPtr);
+                let a3 = &mut *(crate::polyfill::core::ptr::from_mut(a3) as *mut MetaPtr);
                 self.encode_syscall_return_mptr(a0, a1, a2, a3);
             }
         } else {

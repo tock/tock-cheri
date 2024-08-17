@@ -896,6 +896,10 @@ impl Kernel {
                         // > process executable memory...), the kernel...MUST
                         // > immediately return a failure with a error code of
                         // > `INVALID`.
+
+                        // CHERI note: we don't do any CHERI checks here because the architecture
+                        // does them for us. The checks are only needed if we convert a capability into
+                        // an integer pointer.
                         let rval1 = upcall_ptr.map_or(None, |upcall_ptr_nonnull| {
                             if !process.is_valid_upcall_function_pointer(upcall_ptr_nonnull.as_ptr()) {
                                 Some(ErrorCode::INVAL)

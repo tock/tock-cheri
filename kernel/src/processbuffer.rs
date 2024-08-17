@@ -286,6 +286,9 @@ impl ReadOnlyProcessBuffer {
     /// `core::mem::align_of::<u8>()` on the respective platform. It
     /// must point to memory mapped as _readable_ and optionally
     /// _writable_ and _executable_.
+    /// On a CHERI platform there are additional requirements that
+    /// that the process had a valid capability for the span
+    /// indicated by the combination of ptr and len.
     pub unsafe fn new_external(
         ptr: *const u8,
         len: usize,

@@ -12,10 +12,11 @@ use crate::ErrorCode;
 ///
 /// ### `memop_num`
 ///
-/// - `0`: BRK. Change the location of the program break and return a
-///   SyscallReturn.
-/// - `1`: SBRK. Change the location of the program break and return the
-///   previous break address.
+/// - `0`: BRK. Change the location of the program break and return the
+///   PREVIOUS break address. If capabilities are supported, will be
+///   bounded from the start of the RW segment to the NEW break.
+/// - `1`: SBRK. Change the location of the program break relatively.
+///    returns the same thing as BRK.
 /// - `2`: Get the address of the start of the application's RAM allocation.
 /// - `3`: Get the address pointing to the first address after the end of the
 ///   application's RAM allocation.
@@ -46,7 +47,7 @@ pub(crate) fn memop(process: &dyn Process, op_type: usize, r1: usize) -> Syscall
         // Op Type 0: BRK
         0 => process
             .brk(r1 as *const u8)
-            .map(|_| SyscallReturn::Success)
+            .map(|new_region| SyscallReturn::SuccessPtr(new_region))
             .unwrap_or(SyscallReturn::Failure(ErrorCode::NOMEM)),
 
         // Op Type 1: SBRK

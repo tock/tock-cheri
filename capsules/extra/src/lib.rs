@@ -3,6 +3,11 @@
 // Copyright Tock Contributors 2022.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    target_feature = "xcheri",
+    feature(const_convert),
+    feature(result_option_inspect)
+)]
 #![no_std]
 
 pub mod test;

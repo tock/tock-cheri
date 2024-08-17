@@ -251,7 +251,7 @@ impl kernel::syscall::UserspaceKernelBoundary for SysCall {
         state.regs[R_A0] = callback.argument0.into();
         state.regs[R_A1] = callback.argument1.into();
         state.regs[R_A2] = callback.argument2.into();
-        state.regs[R_A3] = callback.argument3.into();
+        state.regs[R_A3] = callback.argument3;
 
         // We also need to set the return address (ra) register so that the new
         // function that the process is running returns to the correct location.
