@@ -80,6 +80,9 @@ pub(crate) struct Config {
     // credentials checking, e.g., whether elf2tab and tockloader are generating
     // properly formatted footers.
     pub(crate) debug_process_credentials: bool,
+
+    /// Whether or not the MMU requires asynchronous configuration
+    pub(crate) async_mpu_config: bool,
 }
 
 /// A unique instance of `Config` where compile-time configuration options are
@@ -92,6 +95,7 @@ pub(crate) const CONFIG: Config = Config {
     debug_load_processes: cfg!(feature = "debug_load_processes"),
     debug_panics: !cfg!(feature = "no_debug_panics"),
     debug_process_credentials: cfg!(feature = "debug_process_credentials"),
+    async_mpu_config: false,
 };
 
 /// Trait allows selecting type based on a const param
