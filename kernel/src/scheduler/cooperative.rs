@@ -38,7 +38,7 @@ impl<'a> CoopProcessNode<'a> {
 }
 
 impl<'a> ListNode<'a, CoopProcessNode<'a>> for CoopProcessNode<'a> {
-    fn next(&'a self) -> &'a ListLink<'a, CoopProcessNode> {
+    fn next(&self) -> &ListLink<'a, CoopProcessNode<'a>> {
         &self.next
     }
 }

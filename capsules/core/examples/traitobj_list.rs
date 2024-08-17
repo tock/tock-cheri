@@ -28,11 +28,11 @@ use kernel::debug;
 
 pub trait Funky<'a>: 'a {
     fn name(&self) -> &'static str;
-    fn next_funky_thing(&'a self) -> &'a ListLink<'a, dyn Funky<'a>>;
+    fn next_funky_thing(&self) -> &ListLink<'a, dyn Funky<'a>>;
 }
 
 impl<'a> ListNode<'a, dyn Funky<'a>> for dyn Funky<'a> {
-    fn next(&'a self) -> &'a ListLink<'a, dyn Funky<'a>> {
+    fn next(&self) -> &ListLink<'a, dyn Funky<'a>> {
         &self.next_funky_thing()
     }
 }
@@ -78,7 +78,7 @@ impl<'a> Funky<'a> for Jazz<'a> {
         "Jazz"
     }
 
-    fn next_funky_thing(&'a self) -> &'a ListLink<'a, dyn Funky<'a>> {
+    fn next_funky_thing(&self) -> &ListLink<'a, dyn Funky<'a>> {
         &self.next
     }
 }
@@ -100,7 +100,7 @@ impl<'a> Funky<'a> for Cheese<'a> {
     fn name(&self) -> &'static str {
         "Cheese"
     }
-    fn next_funky_thing(&'a self) -> &'a ListLink<'a, dyn Funky<'a>> {
+    fn next_funky_thing(&self) -> &ListLink<'a, dyn Funky<'a>> {
         &self.next
     }
 }

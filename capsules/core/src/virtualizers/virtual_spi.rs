@@ -223,7 +223,7 @@ impl<'a, Spi: hil::spi::SpiMaster<'a>> hil::spi::SpiMasterClient
 impl<'a, Spi: hil::spi::SpiMaster<'a>> ListNode<'a, VirtualSpiMasterDevice<'a, Spi>>
     for VirtualSpiMasterDevice<'a, Spi>
 {
-    fn next(&'a self) -> &'a ListLink<'a, VirtualSpiMasterDevice<'a, Spi>> {
+    fn next(&self) -> &ListLink<'a, VirtualSpiMasterDevice<'a, Spi>> {
         &self.next
     }
 }

@@ -122,7 +122,7 @@ pub struct UDPReceiver<'a> {
 }
 
 impl<'a> ListNode<'a, UDPReceiver<'a>> for UDPReceiver<'a> {
-    fn next(&'a self) -> &'a ListLink<'a, UDPReceiver<'a>> {
+    fn next(&self) -> &ListLink<'a, UDPReceiver<'a>> {
         &self.next
     }
 }

@@ -239,7 +239,7 @@ impl<'a, M: device::MacDevice<'a>> MacUser<'a, M> {
 }
 
 impl<'a, M: device::MacDevice<'a>> ListNode<'a, MacUser<'a, M>> for MacUser<'a, M> {
-    fn next(&'a self) -> &'a ListLink<'a, MacUser<'a, M>> {
+    fn next(&self) -> &ListLink<'a, MacUser<'a, M>> {
         &self.next
     }
 }
