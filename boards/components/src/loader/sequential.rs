@@ -77,7 +77,7 @@ impl<C: Chip, D: ProcessStandardDebug, const NUM_PROCS: usize> Component
 
     type Output = &'static kernel::process::SequentialProcessLoaderMachine<'static, C, D>;
 
-    fn finalize(mut self, s: Self::StaticInput) -> Self::Output {
+    fn finalize(self, s: Self::StaticInput) -> Self::Output {
         let proc_manage_cap =
             kernel::create_capability!(kernel::capabilities::ProcessManagementCapability);
 

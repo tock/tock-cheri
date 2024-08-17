@@ -18,5 +18,8 @@ segger = { path = "../../chips/segger" }
 
 tock-tbf = { path = "../../libraries/tock-tbf" }
 
+[features]
+use_static_init = ["kernel/use_static_init"]
+
 [lints]
 workspace = true

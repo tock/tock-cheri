@@ -3,6 +3,13 @@
 // Copyright Tock Contributors 2024.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    all(target_feature = "xcheri", feature = "use_static_init"),
+    feature(const_refs_to_cell),
+    feature(const_trait_impl),
+    feature(macro_metavar_expr),
+    feature(const_mut_refs)
+)]
 #![no_std]
 
 pub mod process_checker;

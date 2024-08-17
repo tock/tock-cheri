@@ -22,14 +22,15 @@
 // Author: Philip Levis <pal@cs.stanford.edu>
 // Last modified: 12/21/2019
 
+use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 
 use capsules_core::alarm::AlarmDriver;
 use capsules_core::virtualizers::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
 use kernel::capabilities;
 use kernel::component::Component;
-use kernel::create_capability;
 use kernel::hil::time::{self, Alarm};
+use kernel::{create_capability, simple_static_component};
 
 // Setup static space for the objects.
 #[macro_export]
@@ -126,3 +127,43 @@ impl<A: 'static + time::Alarm<'static>> Component for AlarmDriverComponent<A> {
         alarm
     }
 }
+
+simple_static_component!(impl<{A: 'static + time::Alarm<'static>}> for AlarmMuxComponent::<A>,
+    Output = MuxAlarm<'static, A>,
+    NewInput = &'static A,
+    FinInput = &'static A,
+    | _slf, input | {MuxAlarm::new(input)},
+    | slf, input | {input.set_alarm_client(slf)}
+);
+
+pub struct AlarmMuxClient<A: 'static + time::Alarm<'static>>(PhantomData<A>);
+
+simple_static_component!(impl<{A: 'static + time::Alarm<'static>}> for AlarmMuxClient::<A>,
+    Output = VirtualMuxAlarm<'static, A>,
+    NewInput = &'static MuxAlarm<'static, A>,
+    FinInput = (),
+    | _slf, input | {VirtualMuxAlarm::new(input)},
+    | slf, _input | {slf.setup();}
+);
+
+simple_static_component!(impl<{A: 'static + time::Alarm<'static>}> for AlarmDriverComponent::<A>,
+    Inherit = AlarmMuxClient<A>,
+    Output = AlarmDriver<'static, VirtualMuxAlarm<'static, A>>,
+    NewInput = (&'static MuxAlarm<'static, A>, capsules_core::alarm::AlarmGrant<A::Ticks>),
+    FinInput = (),
+    | _slf, input, supe | super{input.0} {AlarmDriver::new(supe, input.1)},
+    | slf, _input, supe | super{()} {supe.set_alarm_client(slf)}
+);
+
+pub struct VirtualSchedulerTimerComponent<A: 'static + time::Alarm<'static>>(PhantomData<A>);
+
+use kernel::platform::scheduler_timer::VirtualSchedulerTimer;
+
+simple_static_component!(impl<{A: 'static + time::Alarm<'static>}> for VirtualSchedulerTimerComponent::<A>,
+    Inherit = AlarmMuxClient<A>,
+    Output = VirtualSchedulerTimer<VirtualMuxAlarm<'static, A>>,
+    NewInput = &'static MuxAlarm<'static, A>,
+    FinInput = (),
+    | _slf, input, supe | super{input} {VirtualSchedulerTimer::new(supe)},
+    | _slf, _input, _supe | super{()} {}
+);

@@ -161,7 +161,7 @@ pub struct VirtualSchedulerTimer<A: 'static + time::Alarm<'static>> {
 }
 
 impl<A: 'static + time::Alarm<'static>> VirtualSchedulerTimer<A> {
-    pub fn new(alarm: &'static A) -> Self {
+    pub const fn new(alarm: &'static A) -> Self {
         Self { alarm }
     }
 }

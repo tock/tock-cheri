@@ -1,0 +1,13 @@
+[package]
+name = "uarts"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tock-registers = { path = "../../libraries/tock-register-interface" }
+kernel = { path = "../../kernel" }
+
+[features]
+ns16550_u8 = []

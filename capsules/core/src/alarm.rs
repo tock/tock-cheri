@@ -14,6 +14,9 @@ use kernel::{ErrorCode, ProcessId};
 use crate::driver;
 pub const DRIVER_NUM: usize = driver::NUM::Alarm as usize;
 
+pub type AlarmGrant<T> =
+    Grant<AlarmData<T>, UpcallCount<NUM_UPCALLS>, AllowRoCount<0>, AllowRwCount<0>>;
+
 #[derive(Copy, Clone, Debug)]
 struct Expiration<T: Ticks> {
     reference: T,
@@ -36,20 +39,11 @@ impl<T: Ticks> Default for AlarmData<T> {
 
 pub struct AlarmDriver<'a, A: Alarm<'a>> {
     alarm: &'a A,
-    app_alarms:
-        Grant<AlarmData<A::Ticks>, UpcallCount<NUM_UPCALLS>, AllowRoCount<0>, AllowRwCount<0>>,
+    app_alarms: AlarmGrant<A::Ticks>,
 }
 
 impl<'a, A: Alarm<'a>> AlarmDriver<'a, A> {
-    pub const fn new(
-        alarm: &'a A,
-        grant: Grant<
-            AlarmData<A::Ticks>,
-            UpcallCount<NUM_UPCALLS>,
-            AllowRoCount<0>,
-            AllowRwCount<0>,
-        >,
-    ) -> AlarmDriver<'a, A> {
+    pub const fn new(alarm: &'a A, grant: AlarmGrant<A::Ticks>) -> AlarmDriver<'a, A> {
         AlarmDriver {
             alarm,
             app_alarms: grant,

@@ -62,3 +62,10 @@ pub trait Component {
     ///   used multiple times.
     fn finalize(self, static_memory: Self::StaticInput) -> Self::Output;
 }
+
+#[cfg(all(target_feature = "xcheri", feature = "use_static_init"))]
+pub use crate::const_component::*;
+
+// To avoid needing cfgs when declaring components, if not supported, we still define some macros
+// TODO
+//#[cfg(all(target_feature = "xcheri", feature = "use_static_init"))]

@@ -115,7 +115,14 @@
     feature(pointer_byte_offsets)
 )]
 #![warn(unreachable_pub)]
+// Sometimes utility functions go into / out of use. This warning is annoying.
+#![allow(dead_code)]
 #![no_std]
+
+// This is used to run the tests on a host
+#[cfg(test)]
+#[macro_use]
+extern crate std;
 
 /// Kernel major version.
 ///
@@ -153,6 +160,8 @@ pub mod upcall;
 pub mod utilities;
 
 pub mod config;
+#[cfg(all(target_feature = "xcheri", feature = "use_static_init"))]
+mod const_component;
 mod kernel;
 mod memop;
 mod process_binary;
@@ -164,6 +173,8 @@ mod syscall_driver;
 
 // Core resources exposed as `kernel::Type`.
 pub use crate::errorcode::ErrorCode;
-pub use crate::kernel::Kernel;
+pub use crate::kernel::{GrantCounter, Kernel, ProtoKernel};
 pub use crate::process::ProcessId;
 pub use crate::scheduler::Scheduler;
+// These types need to be leaked for use by schedulers and board specific type
+pub use crate::kernel::{ProcEntry, ProcessArray};
