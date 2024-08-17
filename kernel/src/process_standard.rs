@@ -18,6 +18,7 @@ use crate::collections::queue::Queue;
 use crate::collections::ring_buffer::RingBuffer;
 use crate::debug;
 use crate::errorcode::ErrorCode;
+use crate::grant::try_free_grant;
 use crate::kernel::Kernel;
 use crate::metaptr::MetaPermissions::Execute;
 use crate::metaptr::{MetaPermissions, MetaPtr};
@@ -432,6 +433,14 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
             return;
         }
 
+        match self.try_release_grants() {
+            Ok(_) => {}
+            Err(_) => {
+                // TODO: we could also do with a policy here for handling zombies
+                panic!("")
+            }
+        }
+
         // Terminate the process, freeing its state and removing any
         // pending tasks from the scheduler's queue.
         self.terminate(completion_code);
@@ -444,6 +453,15 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
 
         // Decide what to do with res later. E.g., if we can't restart
         // want to reclaim the process resources.
+    }
+
+    /// Try to release all grant memory. If no capsule have been allowed the
+    /// HoldGrantReferencesCapability or HoldAllowReferencesCapability then this cannot fail.
+    /// If they are still holding references (for the purpose of DMA) then this process cannot
+    /// release its memory.
+    fn try_release_grants(&self) -> Result<(), ()> {
+        let _ = try_free_grant(self);
+        Ok(())
     }
 
     fn terminate(&self, completion_code: Option<u32>) {
@@ -873,23 +891,15 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
         driver_num: usize,
         size: usize,
         align: usize,
-    ) -> Result<(), ()> {
+    ) -> Option<NonNull<u8>> {
         // Do not modify an inactive process.
         if !self.is_running() {
-            return Err(());
+            return None;
         }
 
         // Verify the grant_num is valid.
         if grant_num >= self.kernel.get_grant_count_and_finalize() {
-            return Err(());
-        }
-
-        // Verify that the grant is not already allocated. If the pointer is not
-        // null then the grant is already allocated.
-        if let Some(is_allocated) = self.grant_is_allocated(grant_num) {
-            if is_allocated {
-                return Err(());
-            }
+            return None;
         }
 
         // Verify that there is not already a grant allocated with the same
@@ -905,30 +915,30 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
         // If we find a match, then the `driver_num` must already be used and
         // the grant allocation fails.
         if exists {
-            return Err(());
+            return None;
         }
 
         // Use the shared grant allocator function to actually allocate memory.
         // Returns `None` if the allocation cannot be created.
         if let Some(grant_ptr) = self.allocate_in_grant_region_internal(size, align) {
             // Update the grant pointer to the address of the new allocation.
-            self.grant_pointers.map_or(Err(()), |grant_pointers| {
+            self.grant_pointers.map_or(None, |grant_pointers| {
                 // Implement `grant_pointers[grant_num] = grant_ptr` without a
                 // chance of a panic.
                 grant_pointers
                     .get_mut(grant_num)
-                    .map_or(Err(()), |grant_entry| {
+                    .map_or(None, |grant_entry| {
                         // Actually set the driver num and grant pointer.
                         grant_entry.driver_num = driver_num;
                         grant_entry.grant_ptr = grant_ptr.as_ptr();
 
-                        // If all of this worked, return true.
-                        Ok(())
+                        // If all of this worked, return the allocated pointer.
+                        Some(grant_ptr)
                     })
             })
         } else {
             // Could not allocate the memory for the grant region.
-            Err(())
+            None
         }
     }
 
@@ -936,10 +946,10 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
         &self,
         size: usize,
         align: usize,
-    ) -> Result<(ProcessCustomGrantIdentifier, NonNull<u8>), ()> {
+    ) -> Option<(ProcessCustomGrantIdentifier, NonNull<u8>)> {
         // Do not modify an inactive process.
         if !self.is_running() {
-            return Err(());
+            return None;
         }
 
         // Use the shared grant allocator function to actually allocate memory.
@@ -949,14 +959,14 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
             // this custom grant in the future.
             let identifier = self.create_custom_grant_identifier(ptr);
 
-            Ok((identifier, ptr))
+            Some((identifier, ptr))
         } else {
             // Could not allocate memory for the custom grant.
-            Err(())
+            None
         }
     }
 
-    fn enter_grant(&self, grant_num: usize) -> Result<NonNull<u8>, Error> {
+    fn get_grant_mem(&self, grant_num: usize) -> Result<Option<NonNull<u8>>, Error> {
         // Do not try to access the grant region of an inactive process.
         if !self.is_running() {
             return Err(Error::InactiveApp);
@@ -973,23 +983,7 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
                     Some(grant_entry) => {
                         // Get a copy of the actual grant pointer.
                         let grant_ptr = grant_entry.grant_ptr;
-
-                        // Check if the grant pointer is marked that the grant
-                        // has already been entered. If so, return an error.
-                        if (grant_ptr as usize) & 0x1 == 0x1 {
-                            // Lowest bit is one, meaning this grant has been
-                            // entered.
-                            Err(Error::AlreadyInUse)
-                        } else {
-                            // Now, to mark that the grant has been entered, we
-                            // set the lowest bit to one and save this as the
-                            // grant pointer.
-                            grant_entry.grant_ptr = (grant_ptr as usize | 0x1) as *mut u8;
-
-                            // And we return the grant pointer to the entered
-                            // grant.
-                            Ok(unsafe { NonNull::new_unchecked(grant_ptr) })
-                        }
+                        Ok(NonNull::new(grant_ptr))
                     }
                     None => Err(Error::AddressOutOfBounds),
                 }
@@ -1011,27 +1005,6 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
         // We never deallocate custom grants and only we can change the
         // `identifier` so we know this is a valid address for the custom grant.
         Ok(custom_grant_address as *mut u8)
-    }
-
-    unsafe fn leave_grant(&self, grant_num: usize) {
-        // Do not modify an inactive process.
-        if !self.is_running() {
-            return;
-        }
-
-        self.grant_pointers.map(|grant_pointers| {
-            // Implement `grant_pointers[grant_num]` without a chance of a
-            // panic.
-            if let Some(grant_entry) = grant_pointers.get_mut(grant_num) {
-                // Get a copy of the actual grant pointer.
-                let grant_ptr = grant_entry.grant_ptr;
-
-                // Now, to mark that the grant has been released, we set the
-                // lowest bit back to zero and save this as the grant
-                // pointer.
-                grant_entry.grant_ptr = (grant_ptr as usize & !0x1) as *mut u8;
-            }
-        });
     }
 
     fn grant_allocated_count(&self) -> Option<usize> {

@@ -83,6 +83,7 @@ pub(crate) struct Config {
 
     pub(crate) is_cheri: bool,
 
+    pub(crate) counted_grant_refs: bool,
     /// Whether or not the MMU requires asynchronous configuration
     pub(crate) async_mpu_config: bool,
 }
@@ -99,6 +100,7 @@ pub(crate) const CONFIG: Config = Config {
     debug_process_credentials: cfg!(feature = "debug_process_credentials"),
     is_cheri: cfg!(target_feature = "xcheri"),
     async_mpu_config: cfg!(target_feature = "xcheri"),
+    counted_grant_refs: cfg!(target_feature = "counted_grant_refs"),
 };
 
 /// Trait allows selecting type based on a const param

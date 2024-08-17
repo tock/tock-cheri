@@ -109,3 +109,14 @@ pub unsafe trait CreatePortTableCapability {}
 /// of the networking stack. A capsule would never hold this capability although
 /// it may hold capabilities created via this capability.
 pub unsafe trait NetworkCapabilityCreationCapability {}
+
+/// The `HoldAllowReferencesCapability` allows the bearer to hold reference counted references
+/// to buffers allowed to the kernel by users.
+/// Until these references are dropped, the process cannot allow another buffer in the same slot,
+/// or be restarted if it crashes.
+pub unsafe trait HoldAllowReferencesCapability {}
+/// The 'HoldGrantReferencesCapability' allows the bearer to hold reference counted references
+/// to the grant region.
+/// Until these references are dropped, the grant region cannot be entered normally, and the
+/// process cannot be restarted if it crashes.
+pub unsafe trait HoldGrantReferencesCapability {}
