@@ -234,7 +234,7 @@ impl ProcessBinary {
             // need to take into account the header length.
             let actual_address = app_flash.as_ptr() as u32 + tbf_header.get_protected_size();
             let expected_address = fixed_flash_start;
-            if actual_address != expected_address {
+            if (actual_address != expected_address) && !CONFIG.contiguous_load_procs {
                 return Err(ProcessBinaryError::IncorrectFlashAddress {
                     actual_address,
                     expected_address,

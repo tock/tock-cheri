@@ -678,7 +678,11 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
             } else if let Err(()) = self.chip.mpu().update_app_memory_region(
                 new_break,
                 self.kernel_memory_break.get(),
-                mpu::Permissions::ReadWriteOnly,
+                if CONFIG.contiguous_load_procs {
+                    mpu::Permissions::ReadWriteExecute
+                } else {
+                    mpu::Permissions::ReadWriteOnly
+                },
                 config,
             ) {
                 Err(Error::OutOfMemory)
@@ -1364,8 +1368,42 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
         app_id: ShortId,
     ) -> Result<(Option<&'static dyn Process>, &'a mut [u8]), (ProcessLoadError, &'a mut [u8])>
     {
+        // Keeping part of the app in flash makes sense if such a memory type actually exists.
+        // However, if being loaded from disk it makes little sense.
+        // Further, splitting the app is problematic. RISCV does not have the compiler mode
+        // to consider global accesses relative to some base.
+        // This means that splitting the application in half makes it non-relocatable even though
+        // the generic code is PIC.
+        // CHERI also adds complexity.
+        // Even though DDC/PCC are separate capabilities, hybrid will make all accesses PC-
+        // relative, but authorise via DDC, requiring read-only data to be covered by DDC.
+        // Purecap CHERI needs the captable to be PC-relative, so it cannot go in flash as
+        // flash cannot contain tags.
+        // With contiguous_load = true, the kernel copies the entire program from flash into
+        // RAM.
+        let contiguous_load = crate::config::CONFIG.contiguous_load_procs;
+
         let process_name = pb.header.get_package_name();
-        let process_ram_requested_size = pb.header.get_minimum_app_ram_size() as usize;
+        let mut process_ram_requested_size = pb.header.get_minimum_app_ram_size() as usize;
+
+        // Save copies of these in case the app was compiled for fixed addresses
+        // for later debugging.
+        let fixed_address_flash = pb.header.get_fixed_address_flash();
+        let fixed_address_ram = if contiguous_load {
+            // TODO: Fix elf2tab to not use magic sentinel value of 0x80000000 vaddr to infer
+            // PIC. This is incompatible with using a sensible vaddr for text in SRAM.
+            None
+        } else {
+            pb.header.get_fixed_address_ram()
+        };
+
+        // A contiguously loaded process indicates where it would like to start in allocated
+        // memory using the fixed address ram field (as it's not using it for anything else).
+        // This allows it to put some stack/bss first if need be.
+        let copied_ram_start = pb.header.get_fixed_address_ram().unwrap_or(0) as usize;
+
+        let flash_protected_size = pb.header.get_protected_size() as usize;
+        let non_header_flash = &pb.flash[flash_protected_size as usize..];
 
         // Initialize MPU region configuration.
         let mut mpu_config = match chip.mpu().new_config() {
@@ -1373,27 +1411,29 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
             None => return Err((ProcessLoadError::MpuConfigurationError, remaining_memory)),
         };
 
-        // Allocate MPU region for flash.
-        if chip
-            .mpu()
-            .allocate_region(
-                pb.flash.as_ptr(),
-                pb.flash.len(),
-                pb.flash.len(),
-                mpu::Permissions::ReadExecuteOnly,
-                &mut mpu_config,
-            )
-            .is_none()
-        {
-            if config::CONFIG.debug_load_processes {
-                debug!(
+        if !contiguous_load {
+            // Allocate MPU region for flash.
+            if chip
+                .mpu()
+                .allocate_region(
+                    pb.flash.as_ptr(),
+                    pb.flash.len(),
+                    pb.flash.len(),
+                    mpu::Permissions::ReadExecuteOnly,
+                    &mut mpu_config,
+                )
+                .is_none()
+            {
+                if config::CONFIG.debug_load_processes {
+                    debug!(
                         "[!] flash={:#010X}-{:#010X} process={:?} - couldn't allocate MPU region for flash",
                         pb.flash.as_ptr() as usize,
                         pb.flash.as_ptr() as usize + pb.flash.len() - 1,
                         process_name
                     );
+                }
+                return Err((ProcessLoadError::MpuInvalidFlashLength, remaining_memory));
             }
-            return Err((ProcessLoadError::MpuInvalidFlashLength, remaining_memory));
         }
 
         // Determine how much space we need in the application's memory space
@@ -1408,17 +1448,9 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
         // Initial size of the kernel-owned part of process memory can be
         // calculated directly based on the initial size of all kernel-owned
         // data structures.
-        //
-        // We require our kernel memory break (located at the end of the
-        // MPU-returned allocated memory region) to be word-aligned. However, we
-        // don't have any explicit alignment constraints from the MPU. To ensure
-        // that the below kernel-owned data structures still fit into the
-        // kernel-owned memory even with padding for alignment, add an extra
-        // `sizeof(usize)` bytes.
-        let initial_kernel_memory_size = grant_ptrs_offset
-            + Self::CALLBACKS_OFFSET
-            + Self::PROCESS_STRUCT_OFFSET
-            + core::mem::size_of::<usize>();
+        // Note, we might actually require slightly more memory due to alignment.
+        // Because we check that kernel/app break do not cross this should not be an error.
+        let initial_kernel_memory_size = grant_ptrs_offset + Self::PROCESS_STRUCT_OFFSET;
 
         // By default we start with the initial size of process-accessible
         // memory set to 0. This maximizes the flexibility that processes have
@@ -1430,9 +1462,17 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
         // the context switching implementation and allocate at least that much
         // memory so that we can successfully switch to the process. This is
         // architecture and implementation specific, so we query that now.
-        let min_process_memory_size = chip
+        let mut min_process_memory_size = chip
             .userspace_kernel_boundary()
             .initial_process_app_brk_size();
+
+        if contiguous_load {
+            // appbrk should cover the moved flash and the process ram increases by that much
+            // The requested size also did not include the stack
+            let extra_size = non_header_flash.len() + copied_ram_start;
+            min_process_memory_size += extra_size;
+            process_ram_requested_size += extra_size;
+        }
 
         // We have to ensure that we at least ask the MPU for
         // `min_process_memory_size` so that we can be sure that `app_brk` is
@@ -1453,7 +1493,7 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
         // Right now, we only support skipping some RAM and leaving a chunk
         // unused so that the memory region starts where the process needs it
         // to.
-        let remaining_memory = if let Some(fixed_memory_start) = pb.header.get_fixed_address_ram() {
+        let remaining_memory = if let Some(fixed_memory_start) = fixed_address_ram {
             // The process does have a fixed address.
             if fixed_memory_start == remaining_memory.as_ptr() as u32 {
                 // Address already matches.
@@ -1513,7 +1553,14 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
             min_total_memory_size,
             min_process_memory_size,
             initial_kernel_memory_size,
-            mpu::Permissions::ReadWriteOnly,
+            if contiguous_load {
+                // TODO: For CHERI, this will still result in W^X. For non-CHERI we may wish to use
+                // two regions still. However, I am uninterested in fixing this until we have a
+                // target without CHERI using this loading mode.
+                mpu::Permissions::ReadWriteExecute
+            } else {
+                mpu::Permissions::ReadWriteOnly
+            },
             &mut mpu_config,
         ) {
             Some((memory_start, memory_size)) => (memory_start, memory_size),
@@ -1546,7 +1593,7 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
         // field is optional, processes that are position independent do not
         // need a fixed address) then we check that we used the same address
         // when we allocated it in RAM.
-        if let Some(fixed_memory_start) = pb.header.get_fixed_address_ram() {
+        if let Some(fixed_memory_start) = fixed_address_ram {
             let actual_address = remaining_memory.as_ptr() as u32 + app_memory_start_offset as u32;
             let expected_address = fixed_memory_start;
             if actual_address != expected_address {
@@ -1630,6 +1677,23 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
         // since no `allow` calls have been made yet.
         let initial_allow_high_water_mark = app_accessible_memory.as_ptr();
 
+        // Copy flash into RAM for the process
+        if contiguous_load {
+            // On CHERI, we need to zero anything accessible by the app
+            if crate::config::CONFIG.is_cheri {
+                app_accessible_memory[0..copied_ram_start].fill(0);
+            }
+            let dst = &mut app_accessible_memory
+                [copied_ram_start..copied_ram_start + non_header_flash.len()];
+
+            dst.copy_from_slice(non_header_flash);
+
+            C::on_executable_memory_changed(NonNull::from(dst));
+
+            if crate::config::CONFIG.is_cheri {
+                app_accessible_memory[copied_ram_start + non_header_flash.len()..].fill(0);
+            }
+        }
         // Set up initial grant region.
         //
         // `kernel_memory_break` is set to the end of kernel-accessible memory
@@ -1645,68 +1709,63 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
         // padding of at most `sizeof(usize)` bytes in the calculation of
         // `initial_kernel_memory_size` above.
         let mut kernel_memory_break = allocated_kernel_memory
-            .as_ptr()
+            .as_mut_ptr()
             .add(allocated_kernel_memory.len());
 
-        kernel_memory_break = kernel_memory_break
-            .wrapping_sub(kernel_memory_break as usize % core::mem::size_of::<usize>());
+        fn aligned_for<T>(ptr: *mut u8) -> *mut T {
+            // Following pattern ensures correct alignment
+            #[allow(clippy::cast_ptr_alignment)]
+            {
+                ((ptr as usize) & !(mem::align_of::<T>() - 1)) as *mut T
+            }
+        }
 
-        // Now that we know we have the space we can setup the grant pointers.
+        // Now that we know we have the space we can setup the grant
+        // pointers.
         kernel_memory_break = kernel_memory_break.offset(-(grant_ptrs_offset as isize));
+        let grant_ptr = aligned_for::<GrantPointerEntry>(kernel_memory_break);
+        kernel_memory_break = grant_ptr as *mut u8;
 
-        // This is safe, `kernel_memory_break` is aligned to a word-boundary,
-        // and `grant_ptrs_offset` is a multiple of the word size.
-        #[allow(clippy::cast_ptr_alignment)]
         // Set all grant pointers to null.
-        let grant_pointers = slice::from_raw_parts_mut(
-            kernel_memory_break as *mut GrantPointerEntry,
-            grant_ptrs_num,
-        );
+        let grant_pointers = slice::from_raw_parts_mut(grant_ptr, grant_ptrs_num);
         for grant_entry in grant_pointers.iter_mut() {
             grant_entry.driver_num = 0;
             grant_entry.grant_ptr = ptr::null_mut();
         }
 
-        // Now that we know we have the space we can setup the memory for the
-        // upcalls.
-        kernel_memory_break = kernel_memory_break.offset(-(Self::CALLBACKS_OFFSET as isize));
-
-        // This is safe today, as MPU constraints ensure that `memory_start`
-        // will always be aligned on at least a word boundary, and that
-        // memory_size will be aligned on at least a word boundary, and
-        // `grant_ptrs_offset` is a multiple of the word size. Thus,
-        // `kernel_memory_break` must be word aligned. While this is unlikely to
-        // change, it should be more proactively enforced.
-        //
-        // TODO: https://github.com/tock/tock/issues/1739
-        #[allow(clippy::cast_ptr_alignment)]
-        // Set up ring buffer for upcalls to the process.
-        let upcall_buf =
-            slice::from_raw_parts_mut(kernel_memory_break as *mut Task, Self::CALLBACK_LEN);
-        let tasks = RingBuffer::new(upcall_buf);
-
         // Last thing in the kernel region of process RAM is the process struct.
         kernel_memory_break = kernel_memory_break.offset(-(Self::PROCESS_STRUCT_OFFSET as isize));
-        let process_struct_memory_location = kernel_memory_break;
+
+        let process_struct_memory_location =
+            aligned_for::<ProcessStandard<'static, C>>(kernel_memory_break);
+        kernel_memory_break = process_struct_memory_location as *mut u8;
 
         // Create the Process struct in the app grant region.
         // Note that this requires every field be explicitly initialized, as
         // we are just transforming a pointer into a structure.
-        let process: &mut ProcessStandard<C> =
-            &mut *(process_struct_memory_location as *mut ProcessStandard<'static, C>);
+        // FIXME: Unsound. This should use maybe uninit. b/312546068
+        let process: &mut ProcessStandard<C> = &mut *(process_struct_memory_location);
 
-        // Ask the kernel for a unique identifier for this process that is being
-        // created.
-        let unique_identifier = kernel.create_process_identifier();
+        // For split processes, text is in flash. Otherwise it is in app memory.
+        let (fn_base, fn_len, init_addr) = {
+            if contiguous_load {
+                (
+                    allocated_memory_start as usize,
+                    min_process_memory_size as usize + copied_ram_start,
+                    // We have to subtract flash_protected_size as the entry includes the protected size
+                    allocated_memory_start as usize + pb.header.get_init_function_offset() as usize
+                        - flash_protected_size
+                        + copied_ram_start,
+                )
+            } else {
+                (
+                    pb.flash.as_ptr() as usize,
+                    pb.flash.len(),
+                    pb.flash.as_ptr() as usize + pb.header.get_init_function_offset() as usize,
+                )
+            }
+        };
 
-        // Save copies of these in case the app was compiled for fixed addresses
-        // for later debugging.
-        let fixed_address_flash = pb.header.get_fixed_address_flash();
-        let fixed_address_ram = pb.header.get_fixed_address_ram();
-
-        process
-            .process_id
-            .set(ProcessId::new(kernel, unique_identifier, index));
         process.app_id = app_id;
         process.kernel = kernel;
         process.chip = chip;
@@ -1785,30 +1844,43 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
             }
         };
 
-        let flash_start = process.flash.as_ptr();
-        let app_start =
-            flash_start.wrapping_add(process.header.get_app_start_offset() as usize) as usize;
-        let init_addr =
-            flash_start.wrapping_add(process.header.get_init_function_offset() as usize) as usize;
-        let fn_base = flash_start as usize;
-        let fn_len = process.flash.len();
         let init_fn = MetaPtr::new_with_metadata(init_addr as *const (), fn_base, fn_len, Execute);
 
-        process.tasks.map(|tasks| {
-            tasks.enqueue(Task::FunctionCall(FunctionCall {
-                source: FunctionCallSource::Kernel,
-                pc: init_fn,
-                argument0: app_start,
-                argument1: process.memory_start as usize,
-                argument2: process.memory_len,
-                argument3: (process.app_break.get() as usize).into(),
-            }));
-        });
+        // This is the start of flash, or copied flash, if contiguously loaded
+        let flash_app_start_addr = if contiguous_load {
+            allocated_memory_start as usize + copied_ram_start
+        } else {
+            process.flash.as_ptr() as usize + flash_protected_size
+        };
 
-        // Set storage permissions. Put this at the end so that `process` is
+        let _ = process.enqueue_task(Task::FunctionCall(FunctionCall {
+            source: FunctionCallSource::Kernel,
+            pc: init_fn,
+            argument0: flash_app_start_addr,
+            argument1: process.memory_start as usize,
+            argument2: process.memory_len,
+            argument3: (process.app_break.get() as usize).into(),
+        }));
+
+        // Set storage permissions. Put this (near) the end so that `process` is
         // completely formed before using it to determine the storage
         // permissions.
         process.storage_permissions = storage_permissions_policy.get_permissions(process);
+
+        // Ask the kernel for a unique identifier and index
+        // for this process that is being created.
+        // Note, we need to do this after any mutable use of process as this will put the shared
+        // reference in the main process array
+        let id = kernel.set_next_proc_entry_used(process);
+
+        let id = match id {
+            Ok(id) => id,
+            Err(e) => return Err((e, unused_memory)),
+        };
+
+        process.process_id.set(id);
+
+        chip.mpu().new_process(id);
 
         // Return the process object and a remaining memory for processes slice.
         Ok((Some(process), unused_memory))
@@ -1884,8 +1956,7 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
         let grant_ptrs_num = self.kernel.get_grant_count_and_finalize();
         let grant_ptrs_offset = grant_ptrs_num * grant_ptr_size;
 
-        let initial_kernel_memory_size =
-            grant_ptrs_offset + Self::PROCESS_STRUCT_OFFSET;
+        let initial_kernel_memory_size = grant_ptrs_offset + Self::PROCESS_STRUCT_OFFSET;
 
         let app_mpu_mem = self.chip.mpu().allocate_app_memory_region(
             self.mem_start(),
@@ -1954,7 +2025,7 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
         self.state.set(State::Yielded);
 
         // And queue up this app to be restarted.
-        let flash_start = self.flash_start();
+        let flash_start = self.flash_start() as usize;
         let app_start =
             flash_start.wrapping_add(self.header.get_app_start_offset() as usize) as usize;
         let init_addr =
@@ -1962,16 +2033,16 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
 
         let init_fn = MetaPtr::new_with_metadata(
             init_addr as *const (),
-            flash_start as usize,
-            (self.flash_end() as usize) - (flash_start as usize),
+            flash_start,
+            self.flash_end() as usize - flash_start,
             Execute,
         );
 
         // Enqueue the initial function.
-        self.tasks.enqueue(Task::FunctionCall(FunctionCall {
+        self.enqueue_task(Task::FunctionCall(FunctionCall {
             source: FunctionCallSource::Kernel,
             pc: init_fn,
-            argument0: flash_app_start,
+            argument0: app_start,
             argument1: self.mem_start() as usize,
             argument2: self.memory_len,
             argument3: (self.app_break.get() as usize).into(),
@@ -2059,7 +2130,11 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
             } else if let Err(()) = self.chip.mpu().update_app_memory_region(
                 self.app_break.get(),
                 new_break,
-                mpu::Permissions::ReadWriteOnly,
+                if CONFIG.contiguous_load_procs {
+                    mpu::Permissions::ReadWriteExecute
+                } else {
+                    mpu::Permissions::ReadWriteOnly
+                },
                 config,
             ) {
                 None

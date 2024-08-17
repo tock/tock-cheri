@@ -85,6 +85,8 @@ pub(crate) struct Config {
 
     pub(crate) counted_grant_refs: bool,
 
+    pub(crate) contiguous_load_procs: bool,
+
     pub(crate) static_init: bool,
 
     /// Whether or not the MMU requires asynchronous configuration
@@ -104,6 +106,7 @@ pub(crate) const CONFIG: Config = Config {
     is_cheri: cfg!(target_feature = "xcheri"),
     async_mpu_config: cfg!(target_feature = "xcheri"),
     counted_grant_refs: cfg!(target_feature = "counted_grant_refs"),
+    contiguous_load_procs: cfg!(target_feature = "contiguous_load"),
     static_init: cfg!(target_feature = "use_static_init"),
 };
 

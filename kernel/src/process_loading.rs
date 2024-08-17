@@ -69,6 +69,33 @@ pub enum ProcessLoadError {
     InternalError,
 }
 
+/*
+impl From<ProcessLoadError> for ErrorCode {
+    fn from(er: ProcessLoadError) -> Self {
+        match er {
+            ProcessLoadError::NotEnoughMemory => ErrorCode::NOMEM,
+            ProcessLoadError::IncorrectFlashAddress { .. }
+            | ProcessLoadError::MemoryAddressMismatch { .. }
+            | ProcessLoadError::MpuInvalidFlashLength
+            | ProcessLoadError::NotEnoughFlash
+            | ProcessLoadError::TbfHeaderParseFailure(_) => ErrorCode::INVAL,
+            ProcessLoadError::IncompatibleKernelVersion { .. } => ErrorCode::NOSUPPORT,
+            ProcessLoadError::InternalError => ErrorCode::FAIL,
+        }
+    }
+}
+
+impl From<tock_tbf::types::TbfParseError> for ProcessLoadError {
+    /// Convert between a TBF Header parse error and a process load error.
+    ///
+    /// We note that the process load error is because a TBF header failed to
+    /// parse, and just pass through the parse error.
+    fn from(error: tock_tbf::types::TbfParseError) -> Self {
+        ProcessLoadError::TbfHeaderParseFailure(error)
+    }
+}
+*/
+
 impl fmt::Debug for ProcessLoadError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {

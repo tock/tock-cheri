@@ -37,6 +37,7 @@ no_debug_panics = []
 debug_process_credentials = []
 counted_grant_refs = []
 use_static_init = []
+contiguous_load = []
 
 [lints]
 workspace = true
