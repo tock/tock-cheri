@@ -16,14 +16,13 @@ use core::{mem, ptr, slice, str};
 
 use crate::collections::queue::Queue;
 use crate::collections::ring_buffer::RingBuffer;
-use crate::config;
 use crate::debug;
 use crate::errorcode::ErrorCode;
 use crate::kernel::Kernel;
 use crate::metaptr::MetaPermissions::Execute;
 use crate::metaptr::{MetaPermissions, MetaPtr};
 use crate::platform::chip::Chip;
-use crate::platform::mpu::{self, MPU};
+use crate::platform::mpu::{self, RemoveRegionResult, MPU};
 use crate::process::BinaryVersion;
 use crate::process::ProcessBinary;
 use crate::process::{Error, FunctionCall, FunctionCallSource, Process, Task};
@@ -34,12 +33,13 @@ use crate::process_checker::AcceptedCredential;
 use crate::process_loading::ProcessLoadError;
 use crate::process_policies::ProcessFaultPolicy;
 use crate::process_policies::ProcessStandardStoragePermissionsPolicy;
+use crate::process_standard::MPURegionState::InUse;
 use crate::processbuffer::{ReadOnlyProcessBuffer, ReadWriteProcessBuffer};
 use crate::storage_permissions::StoragePermissions;
 use crate::syscall::{self, Syscall, SyscallReturn, UserspaceKernelBoundary};
 use crate::upcall::UpcallId;
 use crate::utilities::cells::{MapCell, NumericCellExt, OptionalCell};
-
+use crate::{config, OnlyInCfg};
 use tock_tbf::types::CommandPermissions;
 
 /// State for helping with debugging apps.
@@ -102,6 +102,16 @@ struct GrantPointerEntry {
     /// The start of the memory location where the grant has been allocated, or
     /// null if the grant has not been allocated.
     grant_ptr: *mut u8,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+enum MPURegionState {
+    // Region can be allocated
+    Free,
+    // Region in active use by the process
+    InUse(mpu::Region),
+    // Process should not be using the region, but this has not yet been configured
+    BeingRevoked(OnlyInCfg!(async_mpu_config, mpu::Region)),
 }
 
 /// A type for userspace processes in Tock.
@@ -220,7 +230,7 @@ pub struct ProcessStandard<'a, C: 'static + Chip> {
     mpu_config: MapCell<<<C as Chip>::MPU as MPU>::MpuConfig>,
 
     /// MPU regions are saved as a pointer-size pair.
-    mpu_regions: [Cell<Option<mpu::Region>>; 6],
+    mpu_regions: [Cell<MPURegionState>; 6],
 
     /// Essentially a list of upcalls that want to call functions in the
     /// process.
@@ -535,6 +545,14 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
         });
     }
 
+    fn disable_mmu(&self) {
+        self.mpu_config.map(|config| {
+            self.chip
+                .mpu()
+                .disable_app_mpu_config(config, &self.processid());
+        });
+    }
+
     fn add_mpu_region(
         &self,
         unallocated_memory_start: *const u8,
@@ -551,8 +569,8 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
             )?;
 
             for region in self.mpu_regions.iter() {
-                if region.get().is_none() {
-                    region.set(Some(new_region));
+                if region.get() == MPURegionState::Free {
+                    region.set(MPURegionState::InUse(new_region));
                     return Some(new_region);
                 }
             }
@@ -562,25 +580,64 @@ impl<C: Chip> Process for ProcessStandard<'_, C> {
         })
     }
 
-    fn remove_mpu_region(&self, region: mpu::Region) -> Result<(), ErrorCode> {
+    fn align_mpu_region(&self, base: usize, length: usize) -> (usize, usize) {
+        C::MPU::align_range(base, length)
+    }
+
+    fn remove_mpu_region(&self, region: mpu::Region) -> Result<mpu::RemoveRegionResult, ErrorCode> {
         self.mpu_config.map_or(Err(ErrorCode::INVAL), |config| {
             // Find the existing mpu region that we are removing; it needs to match exactly.
-            if let Some(internal_region) = self
-                .mpu_regions
-                .iter()
-                .find(|r| r.get().map_or(false, |r| r == region))
-            {
-                self.chip
+            if let Some(internal_region) = self.mpu_regions.iter().find(|r| match r.get() {
+                InUse(r) => r == region,
+                _ => false,
+            }) {
+                let result = self
+                    .chip
                     .mpu()
                     .remove_memory_region(region, config)
                     .or(Err(ErrorCode::FAIL))?;
 
-                // Remove this region from the tracking cache of mpu_regions
-                internal_region.set(None);
-                Ok(())
+                match result {
+                    RemoveRegionResult::Sync => {
+                        // Remove this region from the tracking cache of mpu_regions
+                        internal_region.set(MPURegionState::Free);
+                    }
+                    RemoveRegionResult::Async(_) => {
+                        // Track as revocation in progress
+                        internal_region.set(MPURegionState::BeingRevoked(<OnlyInCfg!(
+                            async_mpu_config,
+                            mpu::Region
+                        )>::new_true(
+                            region
+                        )))
+                    }
+                }
+
+                Ok(result)
             } else {
                 Err(ErrorCode::INVAL)
             }
+        })
+    }
+
+    /// Actually revoke regions previously requested with remove_memory_region
+    /// Safety: no LiveARef or LivePRef may exist to any memory that might be revoked,
+    /// Nor may any grants be entered via the legacy mechanism if allowed memory might be revoked.
+    unsafe fn revoke_regions(&self) -> Result<(), ErrorCode> {
+        self.mpu_config.map_or(Err(ErrorCode::INVAL), |config| {
+            let result = unsafe { self.chip.mpu().revoke_regions(config, self) };
+
+            // On success, all being revoked regions will now be free
+            if result.is_ok() {
+                for r in &self.mpu_regions {
+                    match r.get() {
+                        MPURegionState::BeingRevoked(_) => r.set(MPURegionState::Free),
+                        _ => {}
+                    }
+                }
+            }
+
+            result
         })
     }
 
@@ -1693,12 +1750,12 @@ impl<C: 'static + Chip> ProcessStandard<'_, C> {
 
         process.mpu_config = MapCell::new(mpu_config);
         process.mpu_regions = [
-            Cell::new(None),
-            Cell::new(None),
-            Cell::new(None),
-            Cell::new(None),
-            Cell::new(None),
-            Cell::new(None),
+            Cell::new(MPURegionState::Free),
+            Cell::new(MPURegionState::Free),
+            Cell::new(MPURegionState::Free),
+            Cell::new(MPURegionState::Free),
+            Cell::new(MPURegionState::Free),
+            Cell::new(MPURegionState::Free),
         ];
         process.tasks = MapCell::new(tasks);
 

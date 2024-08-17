@@ -668,6 +668,9 @@ pub trait Process {
     /// the process will not run again).
     fn setup_mpu(&self);
 
+    /// Disable MMU configuration specific to this process.
+    fn disable_mmu(&self);
+
     /// Allocate a new MPU region for the process that is at least
     /// `min_region_size` bytes and lies within the specified stretch of
     /// unallocated memory.
@@ -681,12 +684,24 @@ pub trait Process {
         min_region_size: usize,
     ) -> Option<mpu::Region>;
 
+    /// Align a region so that the MPU could enforce it
+    /// FIXME: I hate that this is in process, but ProcessStandard seems to be the only thing
+    /// that knows about the type of the MPU. Really, Kernel should be parameterised in the
+    /// Chip, rather than its individual methods, so the type does not get lost.
+    /// b/280426926
+    fn align_mpu_region(&self, base: usize, length: usize) -> (usize, usize);
+
     /// Removes an MPU region from the process that has been previously added
     /// with `add_mpu_region`.
     ///
     /// It is not valid to call this function when the process is inactive (i.e.
     /// the process will not run again).
-    fn remove_mpu_region(&self, region: mpu::Region) -> Result<(), ErrorCode>;
+    fn remove_mpu_region(&self, region: mpu::Region) -> Result<mpu::RemoveRegionResult, ErrorCode>;
+
+    /// Actually revoke regions previously requested with remove_memory_region
+    /// Safety: no LiveARef or LivePRef may exist to any memory that might be revoked,
+    /// Nor may any grants be entered via the legacy mechanism if allowed memory might be revoked.
+    unsafe fn revoke_regions(&self) -> Result<(), ErrorCode>;
 
     // grants
 
