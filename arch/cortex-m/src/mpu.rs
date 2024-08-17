@@ -18,6 +18,7 @@ use kernel::utilities::math;
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
 use kernel::utilities::registers::{register_bitfields, FieldValue, ReadOnly, ReadWrite};
 use kernel::utilities::StaticRef;
+use kernel::{ErrorCode, ProcessId};
 
 /// Smallest allowable MPU region across all CortexM cores
 /// Individual cores may have bigger min sizes, but never lower than 32

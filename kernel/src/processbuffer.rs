@@ -26,7 +26,7 @@
 
 use core::cell::Cell;
 use core::marker::PhantomData;
-use core::ops::{Deref, DerefMut, Index, Range, RangeFrom, RangeTo};
+use core::ops::{Deref, DerefMut, Index, IndexMut, Range, RangeFrom, RangeTo};
 use core::ptr::NonNull;
 
 use crate::capabilities;

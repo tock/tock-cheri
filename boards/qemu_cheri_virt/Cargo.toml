@@ -1,0 +1,21 @@
+[package]
+name = "qemu_cheri_virt"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+components = { path = "../components", features = ["use_static_init"] }
+capsules-core = { path = "../../capsules/core", features = ["use_static_init"] }
+capsules-extra = { path = "../../capsules/extra", features = ["use_static_init"] }
+capsules-system = { path = "../../capsules/system", features = ["use_static_init"] }
+kernel = { path = "../../kernel", features = ["use_static_init", "counted_grant_refs"] }
+misc = { path = "../../libraries/misc" }
+uarts = { path = "../../chips/uarts", features = ["ns16550_u8"]}
+riscv = { path = "../../arch/riscv", features = ["use_static_init"]}
+cheri = { path = "../../arch/cheri" }
+sifive = { path = "../../chips/sifive" , features = ["use_static_init"]}
+
+[lints]
+workspace = true

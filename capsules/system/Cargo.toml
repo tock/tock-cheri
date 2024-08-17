@@ -11,6 +11,7 @@ edition.workspace = true
 [dependencies]
 kernel = { path = "../../kernel" }
 tock-tbf = { path = "../../libraries/tock-tbf" }
+misc = { path = "../../libraries/misc" }
 
 [features]
 use_static_init = ["kernel/use_static_init"]

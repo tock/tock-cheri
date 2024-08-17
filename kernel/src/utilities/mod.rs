@@ -10,6 +10,7 @@ pub mod capability_ptr;
 pub mod copy_slice;
 pub mod helpers;
 pub mod leasable_buffer;
+pub mod leased_buffer;
 pub mod machine_register;
 pub mod math;
 pub mod mut_imut_buffer;

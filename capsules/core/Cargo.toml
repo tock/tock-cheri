@@ -12,6 +12,7 @@ edition.workspace = true
 kernel = { path = "../../kernel" }
 enum_primitive = { path = "../../libraries/enum_primitive" }
 tickv = { path = "../../libraries/tickv" }
+misc = { path = "../../libraries/misc" }
 
 [features]
 use_static_init = ["kernel/use_static_init"]

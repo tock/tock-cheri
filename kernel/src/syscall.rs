@@ -73,7 +73,7 @@ use crate::process;
 use crate::utilities::capability_ptr::CapabilityPtr;
 use crate::utilities::machine_register::MachineRegister;
 
-pub use crate::syscall_driver::{CommandReturn, SyscallDriver};
+pub use crate::syscall_driver::{CommandReturn, CommandReturnResult, SyscallDriver};
 
 // ---------- SYSTEMCALL ARGUMENT DECODING ----------
 
@@ -602,6 +602,24 @@ pub trait UserspaceKernelBoundary {
         app_brk: *const u8,
         state: &mut Self::StoredState,
     ) -> Result<(), ()>;
+
+    /// Get extra arguments. This should only be called in the context of handling a syscall,
+    /// otherwise the values returned may not be meaningful.
+    /// ### Safety
+    ///
+    /// This function guarantees that it if needs to change process memory, it
+    /// will only change memory starting at `accessible_memory_start` and before
+    /// `app_brk`. The caller is responsible for guaranteeing that those
+    /// pointers are valid for the process.
+    unsafe fn get_extra_syscall_arg(
+        &self,
+        _ndx: usize,
+        _accessible_memory_start: *const u8,
+        _app_brk: *const u8,
+        _state: &Self::StoredState,
+    ) -> Option<usize> {
+        None
+    }
 
     /// Set the return value the process should see when it begins executing
     /// again after the syscall. This will only be called after a process has
