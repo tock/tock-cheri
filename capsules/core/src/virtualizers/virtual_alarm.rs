@@ -56,8 +56,8 @@ impl<'a, A: Alarm<'a>> ListNode<'a, VirtualMuxAlarm<'a, A>> for VirtualMuxAlarm<
 
 impl<'a, A: Alarm<'a>> VirtualMuxAlarm<'a, A> {
     /// After calling new, always call setup()
-    pub fn new(mux_alarm: &'a MuxAlarm<'a, A>) -> VirtualMuxAlarm<'a, A> {
-        let zero = A::Ticks::from(0);
+    pub const fn new(mux_alarm: &'a MuxAlarm<'a, A>) -> VirtualMuxAlarm<'a, A> {
+        let zero = A::Ticks::ZERO;
         VirtualMuxAlarm {
             mux: mux_alarm,
             dt_reference: Cell::new(TickDtReference {

@@ -153,7 +153,13 @@ impl SysCall {
     pub const unsafe fn new() -> SysCall {
         SysCall(())
     }
+    pub const fn const_new(chk: &mut kernel::utilities::singleton_checker::SingletonChecker) -> Self {
+        kernel::assert_single!(chk);
+        Self(())
+    }
 }
+
+kernel::very_simple_component!(impl for SysCall, const_new(&'a mut kernel::utilities::singleton_checker::SingletonChecker));
 
 impl kernel::syscall::UserspaceKernelBoundary for SysCall {
     type StoredState = RiscvStoredState;

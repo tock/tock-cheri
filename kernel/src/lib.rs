@@ -90,13 +90,36 @@
 //!    use cases are discovered.
 
 #![cfg_attr(
+    all(target_feature = "xcheri", feature = "use_static_init"),
+    feature(macro_metavar_expr),
+    feature(const_precise_live_drops),
+    feature(const_trait_impl),
+    feature(const_mut_refs),
+    feature(const_slice_split_at_mut),
+    feature(core_intrinsics),
+    feature(slice_ptr_get),
+    feature(slice_ptr_len),
+    feature(nonnull_slice_from_raw_parts),
+    feature(const_nonnull_slice_from_raw_parts),
+    feature(const_refs_to_cell),
+    feature(const_maybe_uninit_zeroed),
+    feature(const_type_id)
+)]
+#![cfg_attr(
     target_feature = "xcheri",
     feature(as_array_of_cells),
     feature(maybe_uninit_slice),
     feature(const_convert)
 )]
 #![warn(unreachable_pub)]
+// Sometimes utility functions go into / out of use. This warning is annoying.
+#![allow(dead_code)]
 #![no_std]
+
+// This is used to run the tests on a host
+#[cfg(test)]
+#[macro_use]
+extern crate std;
 
 /// Kernel major version.
 ///
@@ -135,6 +158,8 @@ pub mod upcall;
 pub mod utilities;
 
 mod config;
+#[cfg(all(target_feature = "xcheri", feature = "use_static_init"))]
+mod const_component;
 mod kernel;
 mod memop;
 mod process_binary;
@@ -146,6 +171,8 @@ mod syscall_driver;
 
 // Core resources exposed as `kernel::Type`.
 pub use crate::errorcode::ErrorCode;
-pub use crate::kernel::Kernel;
+pub use crate::kernel::{GrantCounter, Kernel, ProtoKernel};
 pub use crate::process::ProcessId;
 pub use crate::scheduler::Scheduler;
+// These types need to be leaked for use by schedulers and board specific type
+pub use crate::kernel::{ProcEntry, ProcessArray};

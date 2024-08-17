@@ -60,9 +60,35 @@ impl<const NUM_PROCS: usize> Component for RoundRobinComponent<NUM_PROCS> {
         let nodes = static_buffer.1.write([UNINIT; NUM_PROCS]);
 
         for (i, node) in nodes.iter_mut().enumerate() {
-            let init_node = node.write(RoundRobinProcessNode::new(&self.processes[i]));
+            let init_node = node.write(RoundRobinProcessNode::new(&self.processes[i].proc_ref));
             scheduler.processes.push_head(init_node);
         }
         scheduler
     }
 }
+
+pub struct RoundRobinSchedWithQueue<const N_PROCS: usize> {
+    sched: RoundRobinSched<'static>,
+    queue: [RoundRobinProcessNode<'static>; N_PROCS],
+}
+
+impl<const N_PROCS: usize> RoundRobinSchedWithQueue<N_PROCS> {
+    pub fn get_sched(&self) -> &RoundRobinSched<'static> {
+        &self.sched
+    }
+}
+
+pub struct StaticRoundRobinComponent<const N_PROCS: usize>();
+
+kernel::simple_static_component!(impl<{const N_PROCS : usize}> for StaticRoundRobinComponent<N_PROCS>,
+    Output = RoundRobinSchedWithQueue<N_PROCS>,
+    NewInput =  &'static [ProcEntry],
+    FinInput = (),
+    | slf, input | {
+        let (hd, proc_list) = kernel::new_const_array!([RoundRobinProcessNode<'static>; N_PROCS], ListLink::empty(), | link, i | {
+            (RoundRobinProcessNode::new_with_next(&input[i].proc_ref, link), ListLink::new(&slf.queue[i]))
+        });
+        RoundRobinSchedWithQueue{ sched :RoundRobinSched::new_with_head(hd), queue : proc_list }
+    },
+    | _slf, _input | {}
+);

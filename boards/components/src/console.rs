@@ -46,7 +46,9 @@ use kernel::hil;
 use kernel::hil::time::{self, Alarm};
 use kernel::hil::uart;
 
-use capsules_core::console::DEFAULT_BUF_SIZE;
+use capsules_core::console::{Console, DEFAULT_BUF_SIZE};
+use kernel::hil::uart::{Receive, Transmit};
+use kernel::simple_static_component;
 
 #[macro_export]
 macro_rules! uart_mux_component_static {
@@ -254,3 +256,44 @@ impl<A: 'static + time::Alarm<'static>> Component for ConsoleOrderedComponent<A>
         console
     }
 }
+
+pub struct UartMuxClientComponent();
+
+simple_static_component!(impl for UartMuxClientComponent,
+    Output = UartDevice<'static>,
+    NewInput = (&'static MuxUart<'static>, bool),
+    FinInput = (),
+    |_slf, input| {UartDevice::new(input.0, input.1)},
+    |slf, _input| {slf.setup()}
+);
+
+simple_static_component!(impl for ConsoleComponent<DEFAULT_BUF_SIZE, DEFAULT_BUF_SIZE>,
+    Inherit = UartMuxClientComponent,
+    Output = Console<'static>,
+    BUFFER_BYTES = 2 * DEFAULT_BUF_SIZE,
+    NewInput = (&'static MuxUart<'static>, capsules_core::console::ConsoleGrant),
+    FinInput = (),
+    |_slf, input, buf, supe | super{(input.0, true)} {
+        let (b1, b2) : (&mut [u8; DEFAULT_BUF_SIZE], &mut [u8; DEFAULT_BUF_SIZE]) = kernel::component::split_array_mut::<u8, {2 * DEFAULT_BUF_SIZE}, DEFAULT_BUF_SIZE, DEFAULT_BUF_SIZE>(buf);
+        Console::new(supe, b1, b2, input.1)
+    },
+    |slf, _input, supe | super{()} {
+             supe.set_transmit_client(slf);
+             supe.set_receive_client(slf);
+     }
+);
+
+/* FIXME: dynamic deferred calls got reworked since I did the proto version. Need to do again.
+simple_static_component!(impl for UartMuxComponent,
+    Output = MuxUart<'static>,
+    BUFFER_BYTES = capsules_core::virtualizers::virtual_uart::RX_BUF_LEN,
+    NewInput = (&'static dyn uart::Uart<'static>, u32, &'static DynamicDeferredCall, &'a mut ProtoDynamicDeferredCall),
+    FinInput = &'static dyn uart::Uart<'static>,
+    |slf, input, buf | {MuxUart::new(input.0, buf, input.1, input.2, input.3.register(slf))},
+    |slf, input | {
+            slf.initialize();
+            input.set_transmit_client(slf);
+            input.set_receive_client(slf);
+    }
+);
+*/

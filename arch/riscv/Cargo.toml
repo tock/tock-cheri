@@ -15,6 +15,7 @@ riscv-csr = { path = "../../libraries/riscv-csr" }
 
 [features]
 page_align_pmp = []
+use_static_init = []
 
 [lints]
 workspace = true

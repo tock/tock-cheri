@@ -20,6 +20,13 @@ impl<T> OptionalCell<T> {
         }
     }
 
+    /// Create a new OptionalCell from an option
+    pub const fn new_option(val: Option<T>) -> OptionalCell<T> {
+        OptionalCell {
+            value: Cell::new(val),
+        }
+    }
+
     /// Create an empty `OptionalCell` (contains just `None`).
     pub const fn empty() -> OptionalCell<T> {
         OptionalCell {

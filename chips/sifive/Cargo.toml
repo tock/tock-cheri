@@ -12,6 +12,8 @@ edition.workspace = true
 rv32i = { path = "../../arch/rv32i" }
 kernel = { path = "../../kernel" }
 
+[features]
+use_static_init = []
 
 [lints]
 workspace = true

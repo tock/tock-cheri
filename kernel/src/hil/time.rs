@@ -135,6 +135,8 @@ pub trait Ticks: Clone + Copy + From<u32> + fmt::Debug + Ord + PartialOrd + Eq {
     /// Scales the ticks by the specified numerator and denominator. If the resulting value would
     /// be greater than u32,`u32::MAX` is returned instead
     fn saturating_scale(self, numerator: u32, denominator: u32) -> u32;
+
+    const ZERO: Self;
 }
 
 /// Represents a clock's frequency in Hz, allowing code to transform
@@ -143,6 +145,15 @@ pub trait Ticks: Clone + Copy + From<u32> + fmt::Debug + Ord + PartialOrd + Eq {
 pub trait Frequency {
     /// Returns frequency in Hz.
     fn frequency() -> u32;
+}
+
+pub struct Freq<const F: u32>();
+
+impl<const F: u32> Frequency for Freq<F> {
+    #[inline]
+    fn frequency() -> u32 {
+        F
+    }
 }
 
 /// Represents a moment in time, obtained by calling `now`.
@@ -522,6 +533,8 @@ impl Ticks for Ticks32 {
             u32::MAX
         }
     }
+
+    const ZERO: Self = Self { 0: 0 };
 }
 
 impl PartialOrd for Ticks32 {
@@ -611,6 +624,8 @@ impl Ticks for Ticks24 {
             u32::MAX
         }
     }
+
+    const ZERO: Self = Self { 0: 0 };
 }
 
 impl PartialOrd for Ticks24 {
@@ -708,6 +723,8 @@ impl Ticks for Ticks16 {
             u32::MAX
         }
     }
+
+    const ZERO: Self = Self { 0: 0 };
 }
 
 impl PartialOrd for Ticks16 {
@@ -801,6 +818,8 @@ impl Ticks for Ticks64 {
             u32::MAX
         }
     }
+
+    const ZERO: Self = Self { 0: 0 };
 }
 
 impl PartialOrd for Ticks64 {
@@ -822,6 +841,36 @@ impl PartialEq for Ticks64 {
 }
 
 impl Eq for Ticks64 {}
+
+/// Basic implementation
+impl Time for () {
+    type Frequency = Freq1MHz;
+    type Ticks = Ticks32;
+
+    fn now(&self) -> Self::Ticks {
+        0.into()
+    }
+}
+
+/// Basic implementation
+impl<'a> Alarm<'a> for () {
+    fn set_alarm_client(&self, _client: &'a dyn AlarmClient) {}
+    fn set_alarm(&self, _reference: Self::Ticks, _dt: Self::Ticks) {}
+    fn get_alarm(&self) -> Self::Ticks {
+        0.into()
+    }
+    fn disarm(&self) -> Result<(), ErrorCode> {
+        Ok(())
+    }
+
+    fn is_armed(&self) -> bool {
+        false
+    }
+
+    fn minimum_dt(&self) -> Self::Ticks {
+        1.into()
+    }
+}
 
 #[cfg(test)]
 mod tests {

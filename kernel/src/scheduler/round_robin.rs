@@ -42,6 +42,12 @@ impl<'a> RoundRobinProcessNode<'a> {
             next: ListLink::empty(),
         }
     }
+    pub const fn new_with_next(
+        proc: &'static Cell<Option<&'static dyn Process>>,
+        next: ListLink<'a, RoundRobinProcessNode<'a>>,
+    ) -> RoundRobinProcessNode<'a> {
+        RoundRobinProcessNode { proc, next }
+    }
 }
 
 impl<'a> ListNode<'a, RoundRobinProcessNode<'a>> for RoundRobinProcessNode<'a> {
@@ -61,15 +67,25 @@ pub struct RoundRobinSched<'a> {
 impl<'a> RoundRobinSched<'a> {
     /// How long a process can run before being pre-empted
     const DEFAULT_TIMESLICE_US: u32 = 10000;
+
     pub const fn new() -> RoundRobinSched<'a> {
-        Self::new_with_time(Self::DEFAULT_TIMESLICE_US)
+        Self::new_with_time_and_head(Self::DEFAULT_TIMESLICE_US, ListLink::empty())
     }
 
-    pub const fn new_with_time(time_us: u32) -> RoundRobinSched<'a> {
+    pub const fn new_with_head(
+        head: ListLink<'a, RoundRobinProcessNode<'a>>,
+    ) -> RoundRobinSched<'a> {
+        Self::new_with_time_and_head(Self::DEFAULT_TIMESLICE_US, head)
+    }
+
+    pub const fn new_with_time_and_head(
+        time_us: u32,
+        head: ListLink<'a, RoundRobinProcessNode<'a>>,
+    ) -> RoundRobinSched<'a> {
         RoundRobinSched {
             time_remaining: Cell::new(time_us),
             timeslice_length: time_us,
-            processes: List::new(),
+            processes: List::new_with_head(head),
             last_rescheduled: Cell::new(false),
         }
     }

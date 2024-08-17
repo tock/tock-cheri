@@ -496,6 +496,20 @@ impl ReadWriteProcessBuffer {
         }
     }
 
+    /// Same as new() but takes an option of a process ID
+    /// If none, then the buffer is always invalid.
+    pub(crate) unsafe fn new_option(
+        ptr: *mut u8,
+        len: usize,
+        process_id: Option<ProcessId>,
+    ) -> Self {
+        ReadWriteProcessBuffer {
+            ptr,
+            len,
+            process_id,
+        }
+    }
+
     /// Construct a new [`ReadWriteProcessBuffer`] over a given
     /// pointer and length.
     ///
@@ -896,7 +910,7 @@ impl ReadableProcessSlice {
     }
 
     /// Return the length of the slice in bytes.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.slice.len()
     }
 

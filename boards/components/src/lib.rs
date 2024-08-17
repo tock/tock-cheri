@@ -2,6 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
+#![cfg_attr(
+    all(target_feature = "xcheri", feature = "use_static_init"),
+    feature(const_trait_impl),
+    feature(const_mut_refs),
+    feature(const_slice_split_at_mut),
+    feature(maybe_uninit_array_assume_init),
+    feature(const_maybe_uninit_array_assume_init),
+    feature(macro_metavar_expr)
+)]
 #![cfg_attr(target_feature = "xcheri", feature(inline_const))]
 #![no_std]
 

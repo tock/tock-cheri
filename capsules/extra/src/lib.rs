@@ -4,6 +4,15 @@
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
+    all(target_feature = "xcheri", feature = "use_static_init"),
+    feature(const_mut_refs),
+    feature(type_alias_impl_trait),
+    feature(array_methods),
+    feature(macro_metavar_expr),
+    feature(const_trait_impl),
+    feature(const_precise_live_drops)
+)]
+#![cfg_attr(
     target_feature = "xcheri",
     feature(const_convert),
     feature(result_option_inspect)

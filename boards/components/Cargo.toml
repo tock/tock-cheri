@@ -16,5 +16,8 @@ capsules-extra = { path = "../../capsules/extra" }
 capsules-system = { path = "../../capsules/system" }
 segger = { path = "../../chips/segger" }
 
+[features]
+use_static_init = ["kernel/use_static_init"]
+
 [lints]
 workspace = true

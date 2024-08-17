@@ -32,11 +32,67 @@ use crate::syscall::{Syscall, YieldCall};
 use crate::syscall_driver::CommandReturn;
 use crate::upcall::{Upcall, UpcallId};
 use crate::utilities::cells::NumericCellExt;
+use crate::utilities::singleton_checker::SingletonChecker;
+use crate::{assert_single, capabilities};
+use crate::{config, very_simple_component};
+use crate::{debug, TIfCfg};
 
 /// Threshold in microseconds to consider a process's timeslice to be exhausted.
 /// That is, Tock will skip re-scheduling a process if its remaining timeslice
 /// is less than this threshold.
 pub(crate) const MIN_QUANTA_THRESHOLD_US: u32 = 500;
+
+pub(crate) struct Counter {
+    grant_counter: Cell<usize>,
+
+    /// Flag to mark that grants have been finalized. This means that the kernel
+    /// cannot support creating new grants because processes have already been
+    /// created and the data structures for grants have already been established
+    /// Initialised only if config feature "static_init" is disabled
+    grants_finalized: Cell<bool>,
+}
+
+type StaticInitType = TIfCfg!(static_init, usize, Counter);
+pub(crate) struct StaticInit(StaticInitType);
+
+impl StaticInit {
+    const fn new(value: usize) -> Self {
+        if CONFIG.static_init {
+            StaticInit(StaticInitType::new_true(value))
+        } else {
+            StaticInit(StaticInitType::new_false(Counter {
+                grant_counter: Cell::new(value),
+                grants_finalized: Cell::new(true),
+            }))
+        }
+    }
+
+    fn get_grant_count(&self) -> usize {
+        if CONFIG.static_init {
+            *self.0.get_true_ref()
+        } else {
+            self.0.get_false_ref().grant_counter.get()
+        }
+    }
+
+    fn increment_grant_count(&self) {
+        if !CONFIG.static_init {
+            self.0.get_false_ref().grant_counter.increment();
+        }
+    }
+
+    fn get_grants_finalized(&self) -> bool {
+        if CONFIG.static_init {
+            true
+        } else {
+            self.0.get_false_ref().grants_finalized.get()
+        }
+    }
+
+    fn set_grants_finalized(&self) {
+        self.0.get_false_ref().grants_finalized.set(true);
+    }
+}
 
 /// Main object for the kernel. Each board will need to create one.
 pub struct Kernel {
@@ -53,13 +109,7 @@ pub struct Kernel {
     /// How many grant regions have been setup. This is incremented on every
     /// call to `create_grant()`. We need to explicitly track this so that when
     /// processes are created they can be allocated pointers for each grant.
-    grant_counter: Cell<usize>,
-
-    /// Flag to mark that grants have been finalized. This means that the kernel
-    /// cannot support creating new grants because processes have already been
-    /// created and the data structures for grants have already been
-    /// established.
-    grants_finalized: Cell<bool>,
+    grant_counter: StaticInit,
 }
 
 /// Holds both the process ID in a location that can outlive a process, and an optional reference to
@@ -99,6 +149,45 @@ fn try_allocate_grant(driver: &dyn SyscallDriver, process: &dyn process::Process
     }
 }
 
+/// Prototype of a kernel. Should be used to initialise the main kernel object.
+///
+pub struct ProtoKernel {}
+
+/// The intent is for c to eventually be a const generic.
+/// `[generic_const_exprs]` was causing issues, so this has been converted back a dynamic value.
+pub struct GrantCounter(usize);
+
+impl ProtoKernel {
+    /// Construct a prototype of the kernel. Grants can be allocated using this, and then it can
+    /// later to converted into a true instantiation of the kernel.
+    pub const fn new(chk: &mut SingletonChecker) -> (Self, GrantCounter) {
+        assert_single!(chk);
+        (Self {}, GrantCounter(0))
+    }
+
+    pub const fn create_grant<
+        T: Default,
+        Upcalls: UpcallSize,
+        AllowROs: AllowRoSize,
+        AllowRWs: AllowRwSize,
+    >(
+        &self,
+        kernel: &'static Kernel,
+        driver_num: usize,
+        counter: GrantCounter,
+        _capability: &dyn capabilities::MemoryAllocationCapability,
+    ) -> (Grant<T, Upcalls, AllowROs, AllowRWs>, GrantCounter) {
+        (
+            Grant::new(kernel, driver_num, counter.0),
+            GrantCounter(counter.0 + 1),
+        )
+    }
+}
+
+very_simple_component!(impl for Kernel,
+    new_from_proto(&'static [ProcEntry], GrantCounter)
+);
+
 impl Kernel {
     /// Create the kernel object that knows about the list of processes.
     ///
@@ -108,8 +197,18 @@ impl Kernel {
     pub const fn new(processes: &'static [ProcEntry]) -> Kernel {
         Kernel {
             processes,
+            processes_allocated: Cell::new(0),
             process_identifier_max: Cell::new(0),
             grant_counter: StaticInit::new(0),
+        }
+    }
+
+    pub const fn new_from_proto(processes: &'static [ProcEntry], counter: GrantCounter) -> Kernel {
+        Kernel {
+            processes,
+            processes_allocated: Cell::new(0),
+            process_identifier_max: Cell::new(0),
+            grant_counter: StaticInit::new(counter.0),
         }
     }
 
@@ -400,13 +499,13 @@ impl Kernel {
         driver_num: usize,
         _capability: &dyn capabilities::MemoryAllocationCapability,
     ) -> Grant<T, Upcalls, AllowROs, AllowRWs> {
-        if self.grants_finalized.get() {
+        if self.grant_counter.get_grants_finalized() {
             panic!("Grants finalized. Cannot create a new grant.");
         }
 
         // Create and return a new grant.
-        let grant_index = self.grant_counter.get();
-        self.grant_counter.increment();
+        let grant_index = self.grant_counter.get_grant_count();
+        self.grant_counter.increment_grant_count();
         Grant::new(self, driver_num, grant_index)
     }
 
@@ -418,8 +517,8 @@ impl Kernel {
     /// In practice, this is called when processes are created, and the process
     /// memory is setup based on the number of current grants.
     pub(crate) fn get_grant_count_and_finalize(&self) -> usize {
-        self.grants_finalized.set(true);
-        self.grant_counter.get()
+        self.grant_counter.set_grants_finalized();
+        self.grant_counter.get_grant_count()
     }
 
     /// Returns the number of grants that have been setup in the system and

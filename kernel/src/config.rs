@@ -84,6 +84,9 @@ pub(crate) struct Config {
     pub(crate) is_cheri: bool,
 
     pub(crate) counted_grant_refs: bool,
+
+    pub(crate) static_init: bool,
+
     /// Whether or not the MMU requires asynchronous configuration
     pub(crate) async_mpu_config: bool,
 }
@@ -101,6 +104,7 @@ pub(crate) const CONFIG: Config = Config {
     is_cheri: cfg!(target_feature = "xcheri"),
     async_mpu_config: cfg!(target_feature = "xcheri"),
     counted_grant_refs: cfg!(target_feature = "counted_grant_refs"),
+    static_init: cfg!(target_feature = "use_static_init"),
 };
 
 /// Trait allows selecting type based on a const param

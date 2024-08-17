@@ -20,13 +20,16 @@
 // Author: Amit Levy <amit@amitlevy.com>
 // Last modified: 12/04/2019
 
-use capsules_core::low_level_debug::LowLevelDebug;
+use crate::console::UartMuxClientComponent;
+use capsules_core::low_level_debug;
+use capsules_core::low_level_debug::{LowLevelDebug, LowLevelDebugZero};
 use capsules_core::virtualizers::virtual_uart::{MuxUart, UartDevice};
 use core::mem::MaybeUninit;
 use kernel::capabilities;
 use kernel::component::Component;
 use kernel::create_capability;
 use kernel::hil;
+use kernel::hil::uart::Transmit;
 
 #[macro_export]
 macro_rules! low_level_debug_component_static {
@@ -91,3 +94,29 @@ impl Component for LowLevelDebugComponent {
         lldb
     }
 }
+
+// This version of the LLDB uses the legacy interface
+kernel::simple_static_component!(impl for LowLevelDebugComponent,
+    Inherit = UartMuxClientComponent,
+    Output = LowLevelDebug<'static, UartDevice<'static>>,
+    BUFFER_BYTES = low_level_debug::BUF_LEN,
+    NewInput = (&'static MuxUart<'static>, low_level_debug::GrantType),
+    FinInput = (),
+    |_slf, input, buf, supe | super{(input.0, true)} {
+        LowLevelDebug::new(buf, supe, input.1)
+    },
+    |slf, _input, supe | super{()} {
+         supe.set_transmit_client(slf);
+     }
+);
+
+pub struct LowLevelDebugZeroComponent();
+
+kernel::simple_static_component!(impl for LowLevelDebugZeroComponent,
+    Output = LowLevelDebugZero,
+    BUFFER_BYTES = low_level_debug::BUF_LEN,
+    NewInput = low_level_debug::GrantType,
+    FinInput = (),
+    |_slf, input, buf | { LowLevelDebugZero::new(buf, input)},
+    |_slf, _input | {}
+);

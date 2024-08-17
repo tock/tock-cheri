@@ -15,10 +15,12 @@ use kernel::utilities::binary_write::WriteToBinaryOffsetWrapper;
 pub struct ProcessPrinterText {}
 
 impl ProcessPrinterText {
-    pub fn new() -> ProcessPrinterText {
+    pub const fn new() -> ProcessPrinterText {
         ProcessPrinterText {}
     }
 }
+
+kernel::very_simple_component!(impl for ProcessPrinterText, new());
 
 impl ProcessPrinter for ProcessPrinterText {
     // `print_overview()` must be synchronous, but does not assume a synchronous

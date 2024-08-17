@@ -6,6 +6,14 @@
 
 #![crate_name = "riscv"]
 #![crate_type = "rlib"]
+#![cfg_attr(
+    all(target_feature = "xcheri", feature = "use_static_init"),
+    feature(naked_functions, split_array),
+    feature(const_trait_impl, const_mut_refs, const_slice_split_at_mut),
+    feature(const_type_id),
+    feature(const_default_impls),
+    feature(macro_metavar_expr)
+)]
 #![cfg_attr(target_feature = "xcheri", feature(nonzero_min_max))]
 #![feature(asm_const)] // Can be added to CHERI only with https://github.com/tock/tock/pull/4150
 #![recursion_limit = "256"]

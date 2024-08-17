@@ -3,6 +3,14 @@
 // Copyright Tock Contributors 2023.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    all(target_feature = "xcheri", feature = "use_static_init"),
+    feature(const_refs_to_cell),
+    feature(const_trait_impl),
+    feature(macro_metavar_expr),
+    feature(const_mut_refs),
+    feature(const_precise_live_drops)
+)]
 #![cfg_attr(target_feature = "xcheri", feature(result_option_inspect))]
 #![no_std]
 
@@ -16,6 +24,7 @@ pub mod alarm;
 pub mod button;
 pub mod console;
 pub mod console_ordered;
+pub mod console_zero;
 pub mod driver;
 pub mod gpio;
 pub mod i2c_master;
