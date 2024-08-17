@@ -40,6 +40,11 @@
  */
 
 PAGE_SIZE = DEFINED(PAGE_SIZE) ? PAGE_SIZE : 512;
+WORD_SIZE = DEFINED(WORD_SIZE) ? WORD_SIZE : 4;
+
+/* If we have a bootloader (or something like QEMU) then the elf entry point
+ * might matter */
+ENTRY(_start)
 
 SECTIONS
 {
@@ -73,7 +78,7 @@ SECTIONS
     /* STATIC ELEMENTS FOR TOCK KERNEL */
     .text :
     {
-        . = ALIGN(4);
+        . = ALIGN(WORD_SIZE);
         _textstart = .;         /* Symbol expected by some MS build toolchains */
         _stext = .;         /* First of standard s,e (start/end) pair */
 
@@ -138,29 +143,29 @@ SECTIONS
            - ctors/dtors
               Symbols used by the C++ runtime for initialization / termination
         */
-        . = ALIGN(4);
+        . = ALIGN(WORD_SIZE);
         KEEP(*(.init))
-        . = ALIGN(4);
+        . = ALIGN(WORD_SIZE);
         __preinit_array_start = .;
         KEEP (*(.preinit_array))
         __preinit_array_end = .;
 
-        . = ALIGN(4);
+        . = ALIGN(WORD_SIZE);
         __init_array_start = .;
         KEEP (*(SORT(.init_array.*)))
         KEEP (*(.init_array))
         __init_array_end = .;
 
-        . = ALIGN(4);
+        . = ALIGN(WORD_SIZE);
         KEEP (*crtbegin.o(.ctors))
         KEEP (*(EXCLUDE_FILE (*crtend.o) .ctors))
         KEEP (*(SORT(.ctors.*)))
         KEEP (*crtend.o(.ctors))
 
-        . = ALIGN(4);
+        . = ALIGN(WORD_SIZE);
         KEEP(*(.fini))
 
-        . = ALIGN(4);
+        . = ALIGN(WORD_SIZE);
         __fini_array_start = .;
         KEEP (*(.fini_array))
         KEEP (*(SORT(.fini_array.*)))
@@ -207,11 +212,10 @@ SECTIONS
     . = ALIGN(PAGE_SIZE);
 
     /* Mark the end of static elements */
-    . = ALIGN(4);
+    . = ALIGN(WORD_SIZE);
     _erodata = .;
     _etext = .;
     _textend = .;   /* alias for _etext expected by some MS toolchains */
-
 
     /* Customer configuration is most often located at the end of the rom. It is
      * conditional, and won't be written if not specified in the board specific
@@ -232,7 +236,7 @@ SECTIONS
     .apps :
     {
         /* _sapps symbol used by Tock to look for first application. */
-        . = ALIGN(4);
+        . = ALIGN(WORD_SIZE);
         _sapps = .;
 
         /* Include placeholder bytes in this section so that the linker
@@ -242,11 +246,8 @@ SECTIONS
          * and openocd fails to write it.
          *
          * An issue has been submitted https://github.com/raspberrypi/openocd/issues/25
+         * These bytes break QEMU which will overwrite flash if this is done.
          */
-        BYTE(0xFF)
-        BYTE(0xFF)
-        BYTE(0xFF)
-        BYTE(0xFF)
     } > prog
     /* _eapps symbol used by tock to calculate the length of app flash */
     _eapps = _sapps + LENGTH(prog);
@@ -267,7 +268,7 @@ SECTIONS
      */
     .relocate : AT (_etext)
     {
-        . = ALIGN(4);
+        . = ALIGN(WORD_SIZE);
         _srelocate = .;
 
         /* The Global Pointer is used by the RISC-V architecture to provide
@@ -292,10 +293,9 @@ SECTIONS
         *(.sdata .sdata.* .gnu.linkonce.r.*)
         *(.data .data.*);
 
-        . = ALIGN(4);
+        . = ALIGN(WORD_SIZE);
         _erelocate = .;
     } > ram
-
 
     .sram (NOLOAD) :
     {
@@ -309,7 +309,7 @@ SECTIONS
          * Elements placed in the .bss and .COMMON sections are simply used to
          * measure amount of memory to zero out.
          */
-        . = ALIGN(4);
+        . = ALIGN(WORD_SIZE);
         _szero = .;
 
         /* In addition to the traditional .bss section, RISC-V splits out a "small data" section
@@ -318,7 +318,7 @@ SECTIONS
         *(.sbss .sbss.* .bss .bss.*);
         *(COMMON)
 
-        . = ALIGN(4);
+        . = ALIGN(WORD_SIZE);
         _ezero = .;
 
 
