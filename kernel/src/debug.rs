@@ -69,6 +69,7 @@ use crate::utilities::binary_write::BinaryToWriteWrapper;
 use crate::utilities::cells::NumericCellExt;
 use crate::utilities::cells::{MapCell, TakeCell};
 use crate::ErrorCode;
+use crate::ProcEntry;
 
 /// This trait is similar to std::io::Write in that it takes bytes instead of a string (contrary to
 /// core::fmt::Write), but io::Write isn't available in no_std (due to std::io::Error not being
@@ -112,9 +113,27 @@ pub unsafe fn panic_print<W: Write + IoWrite, C: Chip, PP: ProcessPrinter>(
     writer: &mut W,
     panic_info: &PanicInfo,
     nop: &dyn Fn(),
-    processes: &'static [Option<&'static dyn Process>],
+    processes: &'static [ProcEntry],
     chip: &'static Option<&'static C>,
     process_printer: &'static Option<&'static PP>,
+) {
+    panic_print_2(
+        writer,
+        panic_info,
+        nop,
+        processes,
+        chip.map(|c| c),
+        process_printer.map(|pp| pp),
+    );
+}
+
+pub unsafe fn panic_print_2<W: Write + IoWrite, C: Chip, PP: ProcessPrinter>(
+    writer: &mut W,
+    panic_info: &PanicInfo,
+    nop: &dyn Fn(),
+    processes: &'static [ProcEntry],
+    chip: Option<&'static C>,
+    process_printer: Option<&'static PP>,
 ) {
     panic_begin(nop);
     // Flush debug buffer if needed
@@ -145,7 +164,7 @@ pub unsafe fn panic<L: hil::led::Led, W: Write + IoWrite, C: Chip, PP: ProcessPr
     writer: &mut W,
     panic_info: &PanicInfo,
     nop: &dyn Fn(),
-    processes: &'static [Option<&'static dyn Process>],
+    processes: &'static [ProcEntry],
     chip: &'static Option<&'static C>,
     process_printer: &'static Option<&'static PP>,
 ) -> ! {
@@ -201,15 +220,23 @@ pub unsafe fn panic_cpu_state<W: Write, C: Chip>(
 ///
 /// **NOTE:** The supplied `writer` must be synchronous.
 pub unsafe fn panic_process_info<PP: ProcessPrinter, W: Write>(
-    procs: &'static [Option<&'static dyn Process>],
+    procs: &'static [ProcEntry],
     process_printer: &'static Option<&'static PP>,
+    writer: &mut W,
+) {
+    panic_process_info_2(procs, process_printer.map(|pp| pp), writer)
+}
+
+pub unsafe fn panic_process_info_2<PP: ProcessPrinter, W: Write>(
+    procs: &'static [ProcEntry],
+    process_printer: Option<&'static PP>,
     writer: &mut W,
 ) {
     process_printer.map(|printer| {
         // print data about each process
         let _ = writer.write_fmt(format_args!("\r\n---| App Status |---\r\n"));
         for proc in procs {
-            proc.map(|process| {
+            proc.proc_ref.get().map(|process| {
                 // Print the memory map and basic process info.
                 //
                 // Because we are using a synchronous printer we do not need to

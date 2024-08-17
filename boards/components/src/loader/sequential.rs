@@ -33,7 +33,6 @@ pub type ProcessLoaderSequentialComponentType<C> =
 
 pub struct ProcessLoaderSequentialComponent<C: Chip + 'static, const NUM_PROCS: usize> {
     checker: &'static kernel::process::ProcessCheckerMachine,
-    processes: &'static mut [Option<&'static dyn kernel::process::Process>],
     kernel: &'static kernel::Kernel,
     chip: &'static C,
     fault_policy: &'static dyn kernel::process::ProcessFaultPolicy,
@@ -44,7 +43,6 @@ pub struct ProcessLoaderSequentialComponent<C: Chip + 'static, const NUM_PROCS: 
 impl<C: Chip, const NUM_PROCS: usize> ProcessLoaderSequentialComponent<C, NUM_PROCS> {
     pub fn new(
         checker: &'static kernel::process::ProcessCheckerMachine,
-        processes: &'static mut [Option<&'static dyn kernel::process::Process>],
         kernel: &'static kernel::Kernel,
         chip: &'static C,
         fault_policy: &'static dyn kernel::process::ProcessFaultPolicy,
@@ -53,7 +51,6 @@ impl<C: Chip, const NUM_PROCS: usize> ProcessLoaderSequentialComponent<C, NUM_PR
     ) -> Self {
         Self {
             checker,
-            processes,
             kernel,
             chip,
             fault_policy,
@@ -78,39 +75,22 @@ impl<C: Chip, const NUM_PROCS: usize> Component for ProcessLoaderSequentialCompo
         const ARRAY_REPEAT_VALUE: Option<kernel::process::ProcessBinary> = None;
         let process_binary_array = s.1.write([ARRAY_REPEAT_VALUE; NUM_PROCS]);
 
-        // These symbols are defined in the standard Tock linker script.
-        extern "C" {
-            /// Beginning of the ROM region containing app images.
-            static _sapps: u8;
-            /// End of the ROM region containing app images.
-            static _eapps: u8;
-            /// Beginning of the RAM region for app memory.
-            static mut _sappmem: u8;
-            /// End of the RAM region for app memory.
-            static _eappmem: u8;
-        }
+        let (flash, ram) = unsafe { kernel::process_loading::get_mems() };
 
-        let loader = unsafe {
+        let loader =
             s.0.write(kernel::process::SequentialProcessLoaderMachine::new(
                 self.checker,
-                *core::ptr::addr_of_mut!(self.processes),
                 process_binary_array,
                 self.kernel,
                 self.chip,
-                core::slice::from_raw_parts(
-                    core::ptr::addr_of!(_sapps),
-                    core::ptr::addr_of!(_eapps) as usize - core::ptr::addr_of!(_sapps) as usize,
-                ),
-                core::slice::from_raw_parts_mut(
-                    core::ptr::addr_of_mut!(_sappmem),
-                    core::ptr::addr_of!(_eappmem) as usize - core::ptr::addr_of!(_sappmem) as usize,
-                ),
+                flash,
+                ram,
                 self.fault_policy,
                 self.storage_policy,
                 self.appid_policy,
                 &proc_manage_cap,
-            ))
-        };
+            ));
+
         self.checker.set_client(loader);
         loader.register();
         loader.start();
