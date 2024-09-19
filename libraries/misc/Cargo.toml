@@ -1,0 +1,21 @@
+# Licensed under the Apache License, Version 2.0 or the MIT License.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Copyright Google LLC 2024.
+
+[package]
+name = "misc"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+test = true
+
+[dependencies]
+
+[features]
+default = []
+track_potatoes = []
+global_test = []
+
+[lints]
+workspace = true

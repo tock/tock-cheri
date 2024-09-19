@@ -99,6 +99,7 @@ members = [
     "libraries/tock-cells",
     "libraries/tock-register-interface",
     "libraries/tickv",
+    "libraries/misc",
 ]
 exclude = ["tools/"]
 resolver = "2"
